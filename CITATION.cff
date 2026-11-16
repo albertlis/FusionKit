@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use FusionKit, please cite it and display the attribution: Built with FusionKit (https://github.com/albertlis/FusionKit)."
+title: FusionKit
+type: software
+authors:
+  - alias: albertlis
+version: 0.1.0
+date-released: 2026-11-16
+repository-code: "https://github.com/albertlis/FusionKit"
+license-url: "https://github.com/albertlis/FusionKit/blob/main/LICENSE"

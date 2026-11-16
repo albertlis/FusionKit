@@ -1,0 +1,16 @@
+{
+  "name": "fusionkit",
+  "owner": {
+    "name": "albertlis"
+  },
+  "metadata": {
+    "description": "Marketplace for fusion-kit: Autodesk Fusion script helpers (fusion_kit), Fusion MCP wiring, DfAM checks and CAD review agents for Claude Code."
+  },
+  "plugins": [
+    {
+      "name": "fusion-kit",
+      "source": ".",
+      "description": "Autodesk Fusion script helpers (fusion_kit) with Fusion MCP wiring, DfAM checks and CAD review agents for Claude Code."
+    }
+  ]
+}

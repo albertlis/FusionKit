@@ -1,0 +1,415 @@
+"""Fully-constrained sketch helpers for Fusion 360.
+
+docs/gotchas.md gotchas encoded here
+--------------------------------
+- addTwoPointRectangle adds NO horizontal/vertical constraints -> added explicitly.
+- rect(): corners jittered by different ~0.04 cm offsets (skewed shape) to avoid Fusion inferring H/V constraints that
+  conflict with explicit dimensions (VCS_SKETCH_OVER_CONSTRAINTS).
+- Non-XY sketches: caller supplies points in MODEL coords; this module converts via
+  sketch.modelToSketchSpace (never assume sketch axis mapping).
+- Units: every geometry argument here (x, y, z, r, points) is mm; the helpers divide by 10 before calling Fusion.
+  Fusion internal length is cm: .value of a length parameter and evaluateExpression return cm (user_params.snapshot_geo: value * 10).
+"""
+
+import contextlib
+from collections.abc import Iterator
+
+import adsk.core
+import adsk.fusion
+
+from fusion_kit.enums import ALIGNED_DIM, HORIZONTAL_DIM, VERTICAL_DIM
+from fusion_kit.expr import Ex, as_str
+from fusion_kit.timeline import check_label, set_label
+
+P3 = adsk.core.Point3D.create
+
+
+def new_sketch(
+    comp: adsk.fusion.Component,
+    plane: str | adsk.fusion.ConstructionPlane | adsk.fusion.BRepFace = "xy",
+    *,
+    label: str,
+) -> adsk.fusion.Sketch:
+    """Create a sketch on a named plane, an explicit ConstructionPlane, or a planar BRepFace.
+
+    plane: "xy" | "xz" | "yz" | adsk.fusion.ConstructionPlane | adsk.fusion.BRepFace (must be planar).
+    label: snake_case timeline name (timeline.check_label); required so the timeline reads as intent.
+    Sketch coords of a face sketch are in the face's own frame -> use to_sketch() for model mm.
+    """
+    if isinstance(plane, str):
+        pl: adsk.fusion.ConstructionPlane | adsk.fusion.BRepFace = {
+            "xy": comp.xYConstructionPlane,
+            "xz": comp.xZConstructionPlane,
+            "yz": comp.yZConstructionPlane,
+        }[plane]
+    else:
+        pl = plane
+    check_label(label)  # before add: a bad label must not leave an unnamed sketch behind
+    s = comp.sketches.add(pl)
+    set_label(s, label)
+    return s
+
+
+def to_sketch(s: adsk.fusion.Sketch, x_mm: float, y_mm: float, z_mm: float) -> adsk.core.Point3D:
+    """MODEL point (mm) -> point in sketch s's own space (cm). Works for any sketch plane or face."""
+    return s.modelToSketchSpace(P3(x_mm / 10, y_mm / 10, z_mm / 10))
+
+
+def circle(
+    s: adsk.fusion.Sketch,
+    x: float,
+    y: float,
+    r: float,
+    z: float = 0.0,
+    diameter: str | Ex | None = None,
+) -> adsk.fusion.SketchCircle:
+    """Circle centred at MODEL point (x, y, z) mm, radius r mm. diameter -> parametric diameter dim.
+
+    Centre stays free: position it with anchor().
+    """
+    c = s.sketchCurves.sketchCircles.addByCenterRadius(to_sketch(s, x, y, z), r / 10)
+    if diameter is not None:
+        g = c.centerSketchPoint.geometry
+        s.sketchDimensions.addDiameterDimension(c, P3(g.x + r / 10, g.y + r / 10, 0)).parameter.expression = as_str(
+            diameter
+        )
+    return c
+
+
+def fillet_corner(
+    s: adsk.fusion.Sketch,
+    line_a: adsk.fusion.SketchLine,
+    line_b: adsk.fusion.SketchLine,
+    corner: adsk.fusion.SketchPoint,
+    radius_expr: str | Ex,
+    radius_mm: float,
+) -> adsk.fusion.SketchArc:
+    """Sketch fillet at the shared corner of two lines; radius bound to radius_expr via a radial dim.
+
+    corner: sketch point where line_a and line_b meet (endpoint of both); Fusion picks the quadrant from it.
+    radius_mm: current value of radius_expr in mm, used for the initial geometry (must match, else the dim re-solves it).
+    Raises if addFillet returns None.
+    """
+    arc = s.sketchCurves.sketchArcs.addFillet(line_a, corner.geometry, line_b, corner.geometry, radius_mm / 10)
+    if arc is None:
+        raise RuntimeError("fillet_corner: addFillet returned None (lines not joined at corner?)")
+    g = arc.centerSketchPoint.geometry
+    s.sketchDimensions.addRadialDimension(
+        arc, P3(g.x + radius_mm / 10, g.y + radius_mm / 10, 0)
+    ).parameter.expression = as_str(radius_expr)
+    return arc
+
+
+def poly(
+    s: adsk.fusion.Sketch,
+    pts: list[tuple[float, float]] | list[tuple[float, float, float]],
+    *,
+    lock_axes: bool = False,
+) -> list[adsk.fusion.SketchLine]:
+    """Closed polygon from MODEL points (mm); 2-tuples mean z=0. No dimensions — use dim() to constrain.
+
+    Returns the SketchLines: line i joins vertex i to vertex i+1 (last closes to first).
+    lock_axes=True adds addHorizontal/addVertical to edges axis-aligned in sketch space (|d| < 1e-9 cm).
+    """
+    if len(pts) < 3:
+        raise ValueError(f"poly: need >=3 points for a closed polygon, got {len(pts)}")
+    sp = [to_sketch(s, p[0], p[1], p[2] if len(p) > 2 else 0.0) for p in pts]
+    lines = s.sketchCurves.sketchLines
+    first = prev = lines.addByTwoPoints(sp[0], sp[1])
+    out = [first]
+    for q in sp[2:]:
+        prev = lines.addByTwoPoints(prev.endSketchPoint, q)
+        out.append(prev)
+    out.append(lines.addByTwoPoints(prev.endSketchPoint, first.startSketchPoint))
+    if lock_axes:
+        gc = s.geometricConstraints
+        n = len(sp)
+        for i, ln in enumerate(out):
+            a, b = sp[i], sp[(i + 1) % n]
+            if abs(b.x - a.x) < 1e-9:
+                gc.addVertical(ln)
+            if abs(b.y - a.y) < 1e-9:
+                gc.addHorizontal(ln)
+    return out
+
+
+RECT_JITTER = 0.04  # cm
+
+
+def rect(
+    s: adsk.fusion.Sketch,
+    a: tuple[float, float, float],
+    b: tuple[float, float, float],
+) -> list[adsk.fusion.SketchLine]:
+    """Sketch-axis-aligned rectangle from two opposite MODEL corners (mm). Adds H/V constraints.
+
+    Two corners get different ~0.04 cm offsets so the initial shape is skewed (no inferred H/V
+    constraints, docs/gotchas.md). The drawn rect is therefore NOT at exact size/position: caller MUST
+    dimension it (dim()) and anchor() corner a
+    (startSketchPoint of line 0, never jittered) so the solver snaps it exact. Returns 4 SketchLines [bottom, right, top, left].
+    """
+    j = RECT_JITTER
+    pa, pb = to_sketch(s, *a), to_sketch(s, *b)
+    c = [(pa.x, pa.y), (pb.x + j, pa.y + j), (pb.x, pb.y), (pa.x - j, pb.y - j)]
+    pts = [P3(x, y, 0) for x, y in c]
+    lines = s.sketchCurves.sketchLines
+    l0 = lines.addByTwoPoints(pts[0], pts[1])
+    l1 = lines.addByTwoPoints(l0.endSketchPoint, pts[2])
+    l2 = lines.addByTwoPoints(l1.endSketchPoint, pts[3])
+    l3 = lines.addByTwoPoints(l2.endSketchPoint, l0.startSketchPoint)
+    gc = s.geometricConstraints
+    gc.addHorizontal(l0)
+    gc.addHorizontal(l2)
+    gc.addVertical(l1)
+    gc.addVertical(l3)
+    return [l0, l1, l2, l3]
+
+
+def dim(
+    s: adsk.fusion.Sketch,
+    a: adsk.fusion.SketchPoint,
+    b: adsk.fusion.SketchPoint,
+    expr: str | Ex,
+    orientation: adsk.fusion.DimensionOrientations = ALIGNED_DIM,
+) -> adsk.fusion.SketchDimension:
+    """Distance dimension between two sketch points, bound to expr (aligned by default)."""
+    ga, gb = a.geometry, b.geometry
+    mid = P3((ga.x + gb.x) / 2 + 0.3, (ga.y + gb.y) / 2 + 0.3, 0)
+    d = s.sketchDimensions.addDistanceDimension(a, b, orientation, mid)
+    d.parameter.expression = as_str(expr)
+    return d
+
+
+Vec = tuple[float, float, float]
+
+
+def project_point(s: adsk.fusion.Sketch, entity: adsk.core.Base) -> adsk.fusion.SketchPoint:
+    """Associative projection of one point-like entity (construction point, other sketch's point) into s."""
+    got = s.project2([entity], True)  # linked: follows the source when params change
+    sp = adsk.fusion.SketchPoint.cast(got[0]) if len(got) == 1 else None
+    if sp is None:
+        raise RuntimeError(f"project_point: projection gave {len(got)} entities, want 1 SketchPoint")
+    return sp
+
+
+def dim_from(
+    s: adsk.fusion.Sketch,
+    ref: adsk.fusion.SketchPoint,
+    ref_mm: Vec,
+    p: adsk.fusion.SketchPoint,
+    offsets: list[tuple[Vec, str | Ex]],
+) -> None:
+    """Live position of p: one H/V dim from ref per (MODEL unit vector, expr) offset.
+
+    ref_mm = ref's model position (mm), only used to map each unit vector onto a sketch axis
+    (sketch x -> horizontal dim, sketch y -> vertical); a vector not along a sketch axis -> ValueError.
+    Dims are unsigned: p must already sit on the right side (draw it at the evaluated position), offsets != 0.
+    """
+    o = to_sketch(s, *ref_mm)
+    for u, e in offsets:
+        q = to_sketch(s, ref_mm[0] + u[0], ref_mm[1] + u[1], ref_mm[2] + u[2])
+        dx, dy = abs(q.x - o.x), abs(q.y - o.y)  # 1 mm unit -> 0.1 cm
+        if dy < 1e-6 and dx > 0.09:
+            dim(s, ref, p, e, HORIZONTAL_DIM)
+        elif dx < 1e-6 and dy > 0.09:
+            dim(s, ref, p, e, VERTICAL_DIM)
+        else:
+            raise ValueError(f"dim_from: model direction {u} is not along a sketch axis (dx={dx}, dy={dy} cm)")
+
+
+def _mm_expr(v: float) -> str:
+    """|v| mm as expression: 6 decimals, trailing zeros stripped. Keeps precision (:g keeps only 6 sig digits)."""
+    return f"{abs(v):.6f}".rstrip("0").rstrip(".") + " mm"
+
+
+def anchor(
+    s: adsk.fusion.Sketch,
+    p: adsk.fusion.SketchPoint,
+    h: str | Ex | None = None,
+    v: str | Ex | None = None,
+    ref: tuple[float, float, float] | None = None,
+) -> None:
+    """Fix point p relative to sketch origin (or ref), in SKETCH axes.
+
+    h / v = horizontal / vertical distance expr; None = p lies on that origin line (zero distance,
+    a 0 dim is invalid in Fusion -> point-alignment constraint instead). Both None -> coincident.
+    Distance dims are UNSIGNED: the side of the origin is decided by p's initial coordinates,
+    not by the sign of h / v. Verify the side with body.pointContainment, never from the print.
+
+    ref  : MODEL point (mm) to measure from instead of the origin. A sketch point is added at ref and
+           fixed to the origin by |coord| dims in sketch axes (zero coord -> alignment); h / v then
+           measure from ref. Optional, far-reference style: e.g. (-50, -50, 0) with h / v as
+           "(expr) - (-50 mm)". Flip not reproduced live (origin dims also tracked negative values, see
+           a GitHub issue (gap template)), so ref is not a flip fix.
+           Works for circle centres (circle(...).centerSketchPoint) and polygon vertices.
+    """
+    if ref is not None:
+        sp = to_sketch(s, *ref)
+        r = s.sketchPoints.add(sp)
+        # dims from SKETCH coords (cm -> mm): on XZ/YZ sketches model axes are mixed into sketch axes.
+        sx, sy = sp.x * 10, sp.y * 10
+        anchor(
+            s,
+            r,
+            None if abs(sx) < 1e-6 else _mm_expr(sx),  # tolerance: transform may give 1e-17
+            None if abs(sy) < 1e-6 else _mm_expr(sy),
+        )
+        _anchor_to(s, p, r, h, v)
+        return
+    _anchor_to(s, p, s.originPoint, h, v)
+
+
+def _anchor_to(
+    s: adsk.fusion.Sketch,
+    p: adsk.fusion.SketchPoint,
+    o: adsk.fusion.SketchPoint,
+    h: str | Ex | None,
+    v: str | Ex | None,
+) -> None:
+    """Constrain p relative to reference point o (origin or ref point), see anchor()."""
+    gc = s.geometricConstraints
+    if h is None and v is None:
+        gc.addCoincident(p, o)
+        return
+    if h is None:
+        gc.addVerticalPoints(o, p)
+    else:
+        dim(s, o, p, h, HORIZONTAL_DIM)
+    if v is None:
+        gc.addHorizontalPoints(o, p)
+    else:
+        dim(s, o, p, v, VERTICAL_DIM)
+
+
+Pt = tuple[str, str, str]  # MODEL x, y, z as signed expressions
+
+
+def mm(expr: str) -> float:
+    """Expression -> mm."""
+    um = adsk.fusion.Design.cast(adsk.core.Application.get().activeProduct).unitsManager
+    return um.evaluateExpression(expr, "mm") * 10
+
+
+def _sketch_dims(s: adsk.fusion.Sketch, p: Pt) -> tuple[str | None, str | None]:
+    """(h, v) unsigned dim exprs from sketch origin for model point p; None = on that origin line."""
+    o = to_sketch(s, 0.0, 0.0, 0.0)
+    if abs(o.x) > 1e-7 or abs(o.y) > 1e-7:
+        raise RuntimeError(f"sketch origin is not the model-origin projection ({o.x}, {o.y})")
+    out: list[str | None] = []
+    for k in (0, 1):
+        found = False
+        for i in range(3):
+            u = [0.0, 0.0, 0.0]
+            u[i] = 1.0
+            q = to_sketch(s, u[0], u[1], u[2])
+            d = (q.x - o.x) if k == 0 else (q.y - o.y)
+            if abs(d) > 0.05:  # 1 mm = 0.1 cm along this sketch axis
+                v = mm(p[i])
+                out.append(None if abs(v) < 1e-6 else (p[i] if v > 0 else f"-({p[i]})"))
+                found = True
+                break
+        if not found:
+            raise RuntimeError(f"sketch axis {k} not along a model axis")
+    return out[0], out[1]
+
+
+def fix_point(s: adsk.fusion.Sketch, sp: adsk.fusion.SketchPoint, p: Pt) -> None:
+    """Dimension sp from the sketch origin to model point p (expressions)."""
+    h, v = _sketch_dims(s, p)
+    anchor(s, sp, h, v)
+
+
+def _drop_inferred(s: adsk.fusion.Sketch, before: set[str]) -> None:
+    """Delete geometric constraints not in `before` (created by the polygon call just made: drawing inference)."""
+    for gc in list(s.geometricConstraints):
+        if gc.entityToken not in before:
+            gc.deleteMe()
+
+
+def param_poly(s: adsk.fusion.Sketch, pts: list[Pt], *, jitter_mm: float = 0.05) -> list[adsk.fusion.SketchLine]:
+    """Closed polygon, every vertex dimensioned to its model-coordinate expressions (fully constrained).
+
+    Per-vertex in-plane start offset = jitter_mm + 0.013 * k * (axis + 1) mm (gaps L62/L64: exact shared coords ->
+    inferred alignment -> VCS_SKETCH_OVER_CONSTRAINTS); the vertex dims snap it back. Geometric constraints created by
+    this call (drawing inference) are deleted before the dims go on; constraints already on the sketch are kept. Out-of-plane coordinate stays exact. Line i starts at vertex i.
+    """
+    o = to_sketch(s, 0.0, 0.0, 0.0)
+    units = [
+        to_sketch(s, 1.0, 0.0, 0.0),
+        to_sketch(s, 0.0, 1.0, 0.0),
+        to_sketch(s, 0.0, 0.0, 1.0),
+    ]
+    normal = max(range(3), key=lambda i: abs(units[i].z - o.z))
+    vals: list[tuple[float, float, float]] = []
+    for k, (a, b, c) in enumerate(pts):
+        v = [mm(a), mm(b), mm(c)]
+        for i in range(3):
+            if i != normal:
+                v[i] += jitter_mm + 0.013 * k * (i + 1)
+        vals.append((v[0], v[1], v[2]))
+    before = {
+        gc.entityToken for gc in s.geometricConstraints
+    }  # constraints already on the sketch (user, earlier polygons)
+    lines = poly(s, vals)
+    _drop_inferred(s, before)  # inferred alignments would fight the vertex dims
+    for ln, p in zip(lines, pts):
+        fix_point(s, ln.startSketchPoint, p)
+    return lines
+
+
+def fixed_poly(s: adsk.fusion.Sketch, pts: list[Pt]) -> list[adsk.fusion.SketchLine]:
+    """Closed polygon at EXACT model values; every vertex SketchPoint set isFixed. No dimensions, no parameters.
+
+    Same input as param_poly (model-coordinate expression triples), line i starts at vertex i. Geometric constraints
+    created by this call (drawing inference) are deleted; constraints already on the sketch are kept. Fixed points
+    make the sketch fully constrained without any dim.
+
+    Use when the profiles are picked in code (keep()) or the sketch is rebuild-only: live parameter change already needs a
+    full rebuild there, so parametric dims buy nothing. Measured: param_poly took 46 s for one 64-dim rib band sketch
+    (fix_point = 2 expression dims per vertex, ~0.4 s each); this helper does not create those dims.
+    NOT parametric: the coordinates are frozen at build time. Use param_poly for anything a user edits as a parameter.
+    """
+    vals = [(mm(a), mm(b), mm(c)) for a, b, c in pts]
+    before = {
+        gc.entityToken for gc in s.geometricConstraints
+    }  # constraints already on the sketch (user, earlier polygons)
+    lines = poly(s, vals)
+    _drop_inferred(s, before)
+    for ln in lines:
+        ln.startSketchPoint.isFixed = True
+    return lines
+
+
+def rect_two_corners(s: adsk.fusion.Sketch, a: Pt, b: Pt, side_h: str, side_v: str) -> None:
+    """Axis-aligned rectangle between opposite model corners a, b (expr tuples), fully constrained.
+
+    side_h / side_v = length expr along SKETCH x / SKETCH y (caller maps model axes to sketch axes).
+    Corner a is anchored from the sketch origin. 4 dims in total; no timeline item (sketch only).
+    """
+    bottom, right, _, _ = rect(s, (mm(a[0]), mm(a[1]), mm(a[2])), (mm(b[0]), mm(b[1]), mm(b[2])))
+    dim(s, bottom.startSketchPoint, bottom.endSketchPoint, side_h)
+    dim(s, right.startSketchPoint, right.endSketchPoint, side_v)
+    fix_point(s, bottom.startSketchPoint, a)
+
+
+def rect_xy(s: adsk.fusion.Sketch, x0: str, y0: str, x1: str, y1: str) -> None:
+    """Fully constrained XY rectangle (x0..x1, y0..y1, z=0) added to sketch s; several calls = several profiles."""
+    rect_two_corners(s, (x0, y0, "0 mm"), (x1, y1, "0 mm"), f"({x1}) - ({x0})", f"({y1}) - ({y0})")
+
+
+def rect_xy_sketch(comp: adsk.fusion.Component, label: str, x0: str, y0: str, x1: str, y1: str) -> adsk.fusion.Sketch:
+    """XY sketch with one fully constrained rectangle; label goes on the sketch (timeline item)."""
+    s = new_sketch(comp, "xy", label=label)
+    rect_xy(s, x0, y0, x1, y1)
+    return s
+
+
+@contextlib.contextmanager
+def deferred(s: adsk.fusion.Sketch) -> Iterator[adsk.fusion.Sketch]:
+    """Batch sketch edits: isComputeDeferred True inside, always reset to False on exit (also on exception).
+    Sketch must be new or not yet read by profiles(): reset happens before the caller reads the computed sketch."""
+    s.isComputeDeferred = True
+    try:
+        yield s
+    finally:
+        s.isComputeDeferred = False

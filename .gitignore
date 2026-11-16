@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+.fusion_defs
+.serena/
+.idea/
+.vscode/
+*.f3d
+*.stl
+*.3mf
+*.step
+.claude/settings.local.json
+Thumbs.db

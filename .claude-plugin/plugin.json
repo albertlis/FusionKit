@@ -1,0 +1,20 @@
+{
+  "name": "fusion-kit",
+  "version": "0.1.0",
+  "description": "Autodesk Fusion script helpers (fusion_kit) with Fusion MCP wiring, DfAM checks and CAD review agents for Claude Code.",
+  "author": {
+    "name": "albertlis"
+  },
+  "homepage": "https://github.com/albertlis/FusionKit",
+  "repository": "https://github.com/albertlis/FusionKit",
+  "privacyPolicyUrl": "https://github.com/albertlis/FusionKit/blob/main/PRIVACY.md",
+  "license": "SEE LICENSE IN LICENSE",
+  "keywords": [
+    "autodesk-fusion",
+    "fusion-360",
+    "cad",
+    "3d-printing",
+    "dfam",
+    "claude-code-plugin"
+  ]
+}

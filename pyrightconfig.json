@@ -1,0 +1,7 @@
+{
+  "extraPaths": [
+    ".fusion_defs"
+  ],
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "basic"
+}

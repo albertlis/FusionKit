@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fusionkit"
+version = "0.1.0"
+description = "Helper library for Autodesk Fusion scripts: typed ops, parametric sketches, DfAM checks. Runs inside Fusion's embedded Python (stdlib + adsk only)."
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.12"
+authors = [{name = "albertlis"}]
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Multimedia :: Graphics :: 3D Modeling",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/albertlis/FusionKit"
+Repository = "https://github.com/albertlis/FusionKit"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["fusion_kit"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--ignore=tests/smoke"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
