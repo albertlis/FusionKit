@@ -1,24 +1,39 @@
 <div align="center">
 
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:FF6B00,100:FFB347&height=200&section=header&text=FusionKit&fontSize=64&fontColor=ffffff&fontAlignY=38&desc=Typed%20helpers%20for%20parametric%20Fusion%20models%2C%20FDM%20checks%20on%20every%20body&descAlignY=60&descSize=20" alt="FusionKit" width="100%">
+
+<a href="#-quick-start">
+<img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=600&size=20&duration=2800&pause=900&color=FF6B00&center=true&vCenter=true&width=620&lines=Describe+a+part,+Claude+builds+it+in+Fusion;Parametric+parts,+named+timeline,+patterns;FDM+checks:+overhangs,+bed+chamfer,+warp+grooves;Claude+Code+plugin+with+hooks+and+agents" alt="Typing animation: describe a part, Claude builds it in Fusion">
+</a>
+
+<p>
+  <img src="https://img.shields.io/badge/Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Windows">
+  <img src="https://img.shields.io/badge/Python-%3E%3D3.12-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python >=3.12">
+  <img src="https://img.shields.io/badge/Autodesk%20Fusion-0696D7?style=for-the-badge&logo=autodesk&logoColor=white" alt="Autodesk Fusion">
+  <img src="https://img.shields.io/badge/Claude%20Code-plugin-D97757?style=for-the-badge&logo=anthropic&logoColor=white" alt="Claude Code plugin">
+  <img src="https://img.shields.io/badge/license-FusionKit%201.0-E34F26?style=for-the-badge" alt="License FusionKit 1.0">
+</p>
+
+<p>
+  <a href="https://github.com/albertlis/FusionKit/actions/workflows/ci.yml"><img src="https://github.com/albertlis/FusionKit/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/github/stars/albertlis/FusionKit?style=flat-square&color=FF6B00" alt="GitHub stars">
+  <img src="https://img.shields.io/github/last-commit/albertlis/FusionKit?style=flat-square&color=FFB347" alt="Last commit">
+  <a href="https://github.com/albertlis/FusionKit/releases"><img src="https://img.shields.io/github/v/release/albertlis/FusionKit?style=flat-square" alt="Release"></a>
+</p>
+
 <img src="docs/img/hero.png" alt="Demo bracket built with FusionKit: plate with mounting holes, gable-slot wall, gussets and fillets" width="720">
 
-# FusionKit
-
-Typed, millimetre-based helpers for parametric Autodesk Fusion models, with FDM print checks on every body.
-
-[![CI](https://github.com/albertlis/FusionKit/actions/workflows/ci.yml/badge.svg)](https://github.com/albertlis/FusionKit/actions/workflows/ci.yml)
-[![release](https://img.shields.io/github/v/release/albertlis/FusionKit)](https://github.com/albertlis/FusionKit/releases)
-![license](https://img.shields.io/badge/license-FusionKit%201.0-blue)
-![Python 3.12 | 3.14](https://img.shields.io/badge/python-3.12%20%7C%203.14-blue)
-![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-purple)
+<sub><b>
+<a href="#-why-fusionkit">Why</a> · <a href="#-what-it-looks-like-with-claude">With Claude</a> · <a href="#-what-it-catches">What it catches</a> · <a href="#-requirements">Requirements</a> · <a href="#-quick-start">Quick start</a> · <a href="#-troubleshooting">Troubleshooting</a> · <a href="#-example">Example</a> · <a href="#-modules">Modules</a> · <a href="#-documentation">Docs</a> · <a href="#-faq">FAQ</a>
+</b></sub>
 
 </div>
 
-[Why](#why-fusionkit) · [With Claude](#what-it-looks-like-with-claude) · [Requirements](#requirements) · [Quick start](#quick-start) · [Troubleshooting](#troubleshooting) · [Example](#example) · [Modules](#modules) · [FAQ](#faq)
+<br>
 
 FusionKit sits between your code and the Autodesk Fusion API (`adsk`) and wraps it in helpers that take millimetres. It is tuned for FDM printing: the DfAM rules assume PETG, a 0.4 mm nozzle and 0.2 mm layers. `report` runs the DfAM rules on every body, with Z up as the print orientation. `printability.check_body` and `printability.sweep` are called explicitly, in a print orientation you choose. It ships as a Python package and as a Claude Code plugin.
 
-## What it looks like with Claude
+## 🤖 What it looks like with Claude
 
 With the plugin installed, Claude runs the build loop. A typical request:
 
@@ -41,7 +56,7 @@ demo_bracket: bodies=1 lumps=1 bbox=90.0x60.0x40.0mm vol=42.139cm3 sketches=7/7 
 
 Most of the time lost with Fusion goes on rediscovering the same pitfalls in every session. The helper index, the API notes and the gotchas let Claude skip that search, so it needs fewer attempts. DfAM problems show up in the report before you slice, so fewer prints fail. Parameters make later changes cheap: you edit one value and the model rebuilds.
 
-## Why FusionKit
+## ✨ Why FusionKit
 
 The raw Fusion API works, but it has sharp edges. FusionKit encodes the fixes, so the next script starts from them.
 
@@ -57,7 +72,7 @@ The raw Fusion API works, but it has sharp edges. FusionKit encodes the fixes, s
 
 The DfAM thresholds are FusionKit defaults; [`docs/dfam_guidelines.md`](docs/dfam_guidelines.md) gives each rule's source.
 
-## What a run looks like
+## 📋 What a run looks like
 
 Every part script ends with `report.report(comp)`. It prints one summary line per component, then one line per DfAM finding. This is the summary from a live run of the demo bracket:
 
@@ -74,28 +89,72 @@ Check each field:
 - `timeline_unnamed=0`: must be zero. `timeline_numbered` lists `x_1..x_n` names, which often mark a pattern that should have been a seed. Justify it or replace it.
 - `dfam=<nF>F/<nW>W`, plus the `DFAM_FAIL` and `DFAM_WARN` lines. Each finding names its rule, as described below. A clean summary with a `DFAM_FAIL` line under it is not a pass.
 
-## What it catches
+## 🔍 What it catches
 
 FusionKit checks every body against FDM rules for PETG, in print orientation. FAIL findings make the Claude Code Stop hook block the session once. WARN findings are only printed. `printability.check_body` finds overhangs past 45°, hanging edges and floating points in a chosen print orientation, and `printability.sweep` ranks several orientations. You call these helpers yourself; `report` does not run them. These are the six rules you will meet most often:
 
-- **`teardrop`**: a horizontal hole needs a pointed roof (a teardrop peak), so the top does not sag.
-- **`seam_notch`**: a vertical hole needs a 0.3 mm V notch. The notch points +Y by default.
-- **`bed_chamfer`**: edges on the bed face need a real chamfer, about 1 mm (0.5 mm in tight spots); a fillet fails.
-- **`warp_grooves`**: a bed face wider than 35 mm needs relief grooves, 0.8 × 0.3 mm on a 30 mm pitch, to reduce warping.
-- **`vertical_corner`**: a sharp vertical corner fails. Use a chamfer, or a fillet of 3 mm or more.
-- **`petg_wall`**: a vertical wall between 0.9 and 1.6 mm fails. That band is two 0.45 mm perimeters, so the result depends on your slicer settings.
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### 💧 `teardrop`
+
+A horizontal hole needs a pointed roof (a teardrop peak), so the top does not sag.
+
+</td>
+<td width="50%" valign="top">
+
+### 🧵 `seam_notch`
+
+A vertical hole needs a 0.3 mm V notch. The notch points +Y by default.
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### 📐 `bed_chamfer`
+
+Edges on the bed face need a real chamfer, about 1 mm (0.5 mm in tight spots). A fillet fails.
+
+</td>
+<td width="50%" valign="top">
+
+### 🌀 `warp_grooves`
+
+A bed face wider than 35 mm needs relief grooves, 0.8 × 0.3 mm on a 30 mm pitch, to reduce warping.
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### 📏 `vertical_corner`
+
+A sharp vertical corner fails. Use a chamfer, or a fillet of 3 mm or more.
+
+</td>
+<td width="50%" valign="top">
+
+### 🧱 `petg_wall`
+
+A vertical wall between 0.9 and 1.6 mm fails. That band is two 0.45 mm perimeters, so the result depends on your slicer settings.
+
+</td>
+</tr>
+</table>
 
 A body can opt out of a rule with the `dfam_skip` attribute and a written reason, for example `teardrop:no horizontal hole here`. The skip is printed, so it stays visible.
 
 <div align="center">
-<img src="docs/img/underside.png" alt="Underside of the demo bracket: warp relief grooves and mounting holes" width="720">
+<img src="docs/img/underside.png" alt="Underside of the demo bracket: warp relief grooves and mounting holes" width="620">
 
 <sub>Underside: 0.8 x 0.3 mm warp relief grooves on a 30 mm pitch, and the four mounting holes.</sub>
 </div>
 
 The full rule table, with sources and the rules that are advisory only, is in [`docs/dfam_guidelines.md`](docs/dfam_guidelines.md).
 
-## Requirements
+## 🧭 Requirements
 
 - **Autodesk Fusion**, with the Fusion MCP server enabled under **Preferences > General > API**. The free Personal plan works. Fusion has to stay open for every run.
 - **Claude Code**, for the plugin path. No Python install is needed for it.
@@ -105,7 +164,7 @@ The full rule table, with sources and the rules that are advisory only, is in [`
 
 Every change is logged in [CHANGELOG.md](CHANGELOG.md).
 
-## Quick start
+## 🚀 Quick start
 
 Open Autodesk Fusion. Then go to **Preferences > General > API** and enable the Fusion MCP server. Its endpoint is `127.0.0.1:27182/mcp` (plain HTTP, local only).
 
@@ -118,7 +177,7 @@ In Claude Code, add the marketplace and install the plugin:
 /plugin install fusion-kit@fusionkit
 ```
 
-No Python install is needed for this path. The plugin contents are listed under [Plugin contents](#plugin-contents). For the optional `fusion-cad` MCP server, see [Recommended MCP stack](#recommended-mcp-stack).
+No Python install is needed for this path. The plugin contents are listed under [Plugin contents](#-plugin-contents). For the optional `fusion-cad` MCP server, see [Recommended MCP stack](#-recommended-mcp-stack).
 
 ### 2. Add the Fusion MCP server to Claude Code
 
@@ -128,7 +187,7 @@ The plugin does not register MCP servers. Add the Fusion server yourself:
 claude mcp add --transport http autodesk-fusion http://127.0.0.1:27182/mcp
 ```
 
-Use the name `autodesk-fusion` exactly. The skill, the `CadSimplifier` agent and the hooks refer to that name. Add `--scope user` to make the server available in every project. For the optional `fusion-cad` server, see [Recommended MCP stack](#recommended-mcp-stack).
+Use the name `autodesk-fusion` exactly. The skill, the `CadSimplifier` agent and the hooks refer to that name. Add `--scope user` to make the server available in every project. For the optional `fusion-cad` server, see [Recommended MCP stack](#-recommended-mcp-stack).
 
 ### 3. Run the demo
 
@@ -178,15 +237,44 @@ Send this through the Fusion MCP `execute` tool, or paste it into Fusion's **Scr
 
 Entry files must define `def run(_context)`. The loader expects the layout `<project>/<pkg>/<pkg>.py`, with optional `parts/` and `anim/` subfolders.
 
-## Troubleshooting
+## 🩺 Troubleshooting
 
-- **MCP call fails with `ECONNREFUSED`.** The Fusion MCP server has stopped. Check that Fusion is open and that the API is enabled under **Preferences > General > API**. Then restart Fusion.
-- **The `mcp__autodesk-fusion__*` tools are missing.** The server is not registered under that name. Run `claude mcp list`. If `autodesk-fusion` is absent, add it with the command in [step 2](#2-add-the-fusion-mcp-server-to-claude-code).
-- **An edited helper still runs its old code.** Fusion keeps modules between runs. Start every script through `loader.run_part`, which purges `fusion_kit.*` first. `loader.py` is cached too: after you change it, restart Fusion.
-- **Your `FUSIONKIT_PATH` is not seen.** This applies only when you set it, for example to a dev clone. A running process does not see new environment variables. Restart Fusion after `setx`.
-- **`ModuleNotFoundError: fusion_kit` at the top of a script.** Move the import inside `run()`, after the `sys.path` insert.
+<details>
+<summary><b>🩺 MCP call fails with <code>ECONNREFUSED</code></b></summary>
 
-## Example
+The Fusion MCP server has stopped. Check that Fusion is open and that the API is enabled under **Preferences > General > API**. Then restart Fusion.
+
+</details>
+
+<details>
+<summary><b>🩺 The <code>mcp__autodesk-fusion__*</code> tools are missing</b></summary>
+
+The server is not registered under that name. Run `claude mcp list`. If `autodesk-fusion` is absent, add it with the command in [step 2](#2-add-the-fusion-mcp-server-to-claude-code).
+
+</details>
+
+<details>
+<summary><b>🩺 An edited helper still runs its old code</b></summary>
+
+Fusion keeps modules between runs. Start every script through `loader.run_part`, which purges `fusion_kit.*` first. `loader.py` is cached too: after you change it, restart Fusion.
+
+</details>
+
+<details>
+<summary><b>🩺 Your <code>FUSIONKIT_PATH</code> is not seen</b></summary>
+
+This applies only when you set it, for example to a dev clone. A running process does not see new environment variables. Restart Fusion after `setx`.
+
+</details>
+
+<details>
+<summary><b>🩺 <code>ModuleNotFoundError: fusion_kit</code> at the top of a script</b></summary>
+
+Move the import inside `run()`, after the `sys.path` insert.
+
+</details>
+
+## 🧩 Example
 
 This is a 60 x 30 x 4 mm plate with two bosses, patterned along the plate edge. Every dimension is a User Parameter, so changing `plate_length` in Fusion rebuilds the part. The file is `my_bracket/my_bracket.py`, run through `run_part` as shown above. The loader adds the FusionKit root to `sys.path` before it runs the entry file, so the top-level `fusion_kit` imports below are safe.
 
@@ -250,7 +338,7 @@ Two things to notice:
 - Every dimension is a User Parameter. The helpers take expression strings, so the model stays editable.
 - `label=` names each timeline item (`plate`, `boss`, `boss_row`, `plate_sketch`). That is why `report` shows zero unnamed items.
 
-## Demo
+## 🎬 Demo
 
 [`examples/demo_bracket/`](examples/demo_bracket/README.md) is a printable PETG bracket built only from FusionKit helpers. What it shows:
 
@@ -262,7 +350,7 @@ Two things to notice:
 
 Build steps: [demo README](examples/demo_bracket/README.md).
 
-## Modules
+## 🧱 Modules
 
 | Module | What it is for |
 |---|---|
@@ -277,11 +365,11 @@ Build steps: [demo README](examples/demo_bracket/README.md).
 
 Every public helper is listed with its signature in [`docs/fusion_kit_api.md`](docs/fusion_kit_api.md). An offline test checks the format of every row.
 
-## How we work with Claude
+## 🧠 How we work with Claude
 
 The working setup (Opus manager, Haiku workers, Adversary review loop, hooks) is described in [`docs/workflow.md`](docs/workflow.md).
 
-## Recommended MCP stack
+## 🔌 Recommended MCP stack
 
 FusionKit runs scripts through Fusion's own MCP server. A second server is optional.
 
@@ -298,7 +386,7 @@ claude mcp add --transport stdio fusion-cad -- fusion-cad-mcp
 
 The name `fusion-cad` is required, because the skill and the hooks refer to it. Both servers are configured by you. The plugin does not register either one.
 
-## Plugin contents
+## 📦 Plugin contents
 
 The Claude Code plugin (`.claude-plugin/plugin.json`, marketplace `fusionkit`) contains:
 
@@ -306,30 +394,32 @@ The Claude Code plugin (`.claude-plugin/plugin.json`, marketplace `fusionkit`) c
 - **Agent:** `agents/CadSimplifier.md`, a read-only design-intent reviewer. It returns a ranked recipe and does not change the design.
 - **Hooks:** four hooks, wired in `hooks/hooks.json`.
 
-The plugin ships no MCP server configuration. See [Quick start](#quick-start) and [Recommended MCP stack](#recommended-mcp-stack) for adding the servers.
+The plugin ships no MCP server configuration. See [Quick start](#-quick-start) and [Recommended MCP stack](#-recommended-mcp-stack) for adding the servers.
 
-## Contributing
+## 🤝 Contributing
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) first. It covers dev setup, tests, the Autodesk stub check, the helper checklist and commit rules.
 
 For anything non-trivial, open an issue first. Offline tests and ruff run in CI on Ubuntu and Windows with Python 3.12 and 3.14. The hook self-tests run on Ubuntu with Python 3.12 only. A change that touches geometry also needs a live smoke run in Fusion, because the offline tests cannot show that Fusion accepts a generated operation.
 
-## Documentation
+## 📚 Documentation
 
-- [`docs/fusion_kit_api.md`](docs/fusion_kit_api.md): the helper index, with signatures and the raw `adsk` calls each helper wraps. Read it before you write a part.
-- [`docs/gotchas.md`](docs/gotchas.md): verified Fusion behaviours.
-- [`docs/dfam_guidelines.md`](docs/dfam_guidelines.md): FDM and PETG rules, FAIL and WARN, with sources.
-- [`CONVENTIONS.md`](CONVENTIONS.md): repository layout, naming and vocabulary.
-- [`CLAUDE.md`](CLAUDE.md): the repository map and rules.
+| | Document | What's inside |
+|:-:|---|---|
+| 📘 | [`docs/fusion_kit_api.md`](docs/fusion_kit_api.md) | The helper index, with signatures and the raw `adsk` calls each helper wraps. Read it before you write a part. |
+| 💡 | [`docs/gotchas.md`](docs/gotchas.md) | Verified Fusion behaviours. |
+| 🧊 | [`docs/dfam_guidelines.md`](docs/dfam_guidelines.md) | FDM and PETG rules, FAIL and WARN, with sources. |
+| 📐 | [`CONVENTIONS.md`](CONVENTIONS.md) | Repository layout, naming and vocabulary. |
+| 🤖 | [`CLAUDE.md`](CLAUDE.md) | The repository map and rules. |
 
-## Roadmap
+## 🔭 Roadmap
 
 Open work:
 
 - More DfAM rules, and rules that are advisory only today.
 - Assembly and joint helpers beyond the dovetail.
 
-## License and attribution
+## 📄 License and attribution
 
 FusionKit is licensed under the **FusionKit License 1.0**: source-available, noncommercial, with attribution required. The full text is in [LICENSE](LICENSE).
 
@@ -339,24 +429,42 @@ Projects built with FusionKit must credit it. For source repositories, put this 
 Built with FusionKit (https://github.com/albertlis/FusionKit)
 ```
 
-## FAQ
+## ❓ FAQ
 
-**Does it work on the free Fusion Personal plan?**
+<details>
+<summary><b>❓ Does it work on the free Fusion Personal plan?</b></summary>
+
 Yes. The Fusion MCP server is available there, and FusionKit runs through it.
 
-**Can I use it commercially?**
+</details>
+
+<details>
+<summary><b>❓ Can I use it commercially?</b></summary>
+
 No, not under the FusionKit License 1.0. Commercial use needs a separate license from the author.
 
-**Why not call `adsk` directly?**
+</details>
+
+<details>
+<summary><b>❓ Why not call <code>adsk</code> directly?</b></summary>
+
 You can, and for a one-off script that is fine. FusionKit pays off when the same problems keep coming back: the module cache, cm units, unnamed timeline items and printing failures found late.
 
-**Does it need Claude?**
+</details>
+
+<details>
+<summary><b>❓ Does it need Claude?</b></summary>
+
 No. The loader, the helpers and `report` work without the plugin, which adds the skill, the agent and the hooks.
 
-## Acknowledgements
+</details>
+
+## 💜 Acknowledgements
 
 - [fusion-cad-mcp](https://github.com/Mfrostbutter/fusion-cad-mcp) by Mfrostbutter, the optional typed tool layer described above.
 
-## Disclaimer
+## 📜 Disclaimer
 
 FusionKit is an independent project. It is not affiliated with, endorsed by or sponsored by Autodesk, Inc. Autodesk and Fusion are trademarks of Autodesk, Inc. (Fusion 360 is also a trademark of Autodesk.) The software is provided as is, without warranty. Check every printed or machined part against its real requirements before you rely on it.
+
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:FFB347,100:FF6B00&height=100&section=footer" width="100%" alt="">
