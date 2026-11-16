@@ -1,7 +1,7 @@
 {
   "name": "fusion-kit",
   "version": "0.1.0",
-  "description": "Autodesk Fusion script helpers (fusion_kit) with Fusion MCP wiring, DfAM checks and CAD review agents for Claude Code.",
+  "description": "Autodesk Fusion helpers (fusion_kit) with FDM (PETG) print checks: DfAM rules, overhang tests, Fusion MCP wiring, CAD review agents.",
   "author": {
     "name": "albertlis"
   },

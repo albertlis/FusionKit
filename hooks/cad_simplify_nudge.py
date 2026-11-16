@@ -6,7 +6,7 @@ Layout assumed (fusion_kit projects): Fusion parts live in `<pkg>/parts/*.py`, o
 
 Mechanics: trigger -> marker per session -> Stop blocks once.
 
-PostToolUse (matcher `mcp__autodesk-fusion__fusion_mcp_execute|Agent|Write|Edit`):
+PostToolUse (matcher `.*autodesk-fusion__fusion_mcp_execute|.*fusion-cad__execute|Agent|Write|Edit`):
 - execute whose script has `run_part(` and `"build"`, and whose result has `bodies=` and `timeline_unnamed=0`
   -> marker (green build).
 - Write/Edit of a part file: `*/parts/*.py` or `<pkg>/<pkg>.py` under the repo root -> marker.
@@ -30,7 +30,9 @@ from pathlib import Path
 EXECUTE = "mcp__autodesk-fusion__fusion_mcp_execute"
 # Plugin-bundled MCP servers get scoped names: mcp__plugin_<plugin>_<server>__<tool>
 PLUGIN_EXECUTE = "mcp__plugin_fusion-kit_autodesk-fusion__fusion_mcp_execute"
-EXECUTE_TOOLS = frozenset({EXECUTE, PLUGIN_EXECUTE})
+CAD_EXECUTE = "mcp__fusion-cad__execute"
+PLUGIN_CAD_EXECUTE = "mcp__plugin_fusion-kit_fusion-cad__execute"
+EXECUTE_TOOLS = frozenset({EXECUTE, PLUGIN_EXECUTE, CAD_EXECUTE, PLUGIN_CAD_EXECUTE})
 AGENT = "Agent"
 EDIT_TOOLS = frozenset({"Write", "Edit"})
 SIMPLIFIER = "CadSimplifier"
@@ -143,9 +145,9 @@ NOT_BUILD = 'print("hello")'
 PKG = "my_part"
 
 
-def ex(script: str, response: str, sid: str = "s1", as_string: bool = False) -> dict[str, object]:
+def ex(script: str, response: str, sid: str = "s1", as_string: bool = False, tool: str = EXECUTE) -> dict[str, object]:
     obj: object = json.dumps({"script": script}) if as_string else {"script": script}
-    return {"tool_name": EXECUTE, "session_id": sid, "tool_input": {"object": obj}, "tool_response": response}
+    return {"tool_name": tool, "session_id": sid, "tool_input": {"object": obj}, "tool_response": response}
 
 
 def edit(file_path: str, sid: str = "s1", tool: str = "Edit") -> dict[str, object]:
@@ -195,6 +197,16 @@ def cases(project: Path) -> tuple[tuple[str, list[dict[str, object]], list[str |
             [None],
         ),
         ("object as JSON string build detected", [ex(BUILD_SCRIPT, GREEN, as_string=True), stop()], [REASON]),
+        (
+            "fusion-cad execute build green -> stop blocks",
+            [ex(BUILD_SCRIPT, GREEN, tool=CAD_EXECUTE), stop()],
+            [REASON],
+        ),
+        (
+            "plugin fusion-cad execute build green -> stop blocks",
+            [ex(BUILD_SCRIPT, GREEN, tool=PLUGIN_CAD_EXECUTE), stop()],
+            [REASON],
+        ),
         ("other Agent does not clear marker", [ex(BUILD_SCRIPT, GREEN), agent("Explore"), stop()], [REASON]),
         ("marker is per session", [ex(BUILD_SCRIPT, GREEN, sid="a"), stop(sid="b"), stop(sid="a")], [None, REASON]),
         ("Edit parts/*.py -> stop blocks", [edit(part), stop()], [REASON]),

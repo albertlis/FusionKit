@@ -31,7 +31,7 @@
         ]
       },
       {
-        "matcher": ".*autodesk-fusion__fusion_mcp_execute|^(Agent|Write|Edit)$",
+        "matcher": ".*autodesk-fusion__fusion_mcp_execute|.*fusion-cad__execute|^(Agent|Write|Edit)$",
         "hooks": [
           {
             "type": "command",

@@ -4,7 +4,6 @@ title: FusionKit
 type: software
 authors:
   - alias: albertlis
-version: 0.1.0
-date-released: 2026-11-16
+version: 0.1.0 # x-release-please-version
 repository-code: "https://github.com/albertlis/FusionKit"
 license-url: "https://github.com/albertlis/FusionKit/blob/main/LICENSE"

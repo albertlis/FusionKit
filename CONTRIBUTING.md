@@ -4,7 +4,7 @@ FusionKit is a helper library for Autodesk Fusion scripts, plus a Claude Code pl
 
 ## Development setup
 
-Python 3.12 (CI runs 3.12 and 3.14 on Ubuntu and Windows) and [uv](https://docs.astral.sh/uv/).
+Python 3.12 (the pytest job in CI runs 3.12 and 3.14 on Ubuntu and Windows) and [uv](https://docs.astral.sh/uv/).
 
 ```
 uv sync --group dev
@@ -12,14 +12,14 @@ uv run pytest -q
 uv run ruff check .
 ```
 
-Static check against the Autodesk stubs (optional). Create the junction once; it is gitignored, do not commit it:
+Static check against the Autodesk stubs (optional). Create the junction once; it is gitignored, do not commit it. Never edit files inside the junction:
 
 ```
 mklink /J .fusion_defs "%APPDATA%\Autodesk\Autodesk Fusion 360\API\Python\defs"
 uvx basedpyright fusion_kit
 ```
 
-Hook selftests (CI runs all four):
+Hook selftests (CI runs all four on Ubuntu, Python 3.12):
 
 ```
 python hooks/cad_simplify_nudge.py --selftest
@@ -39,12 +39,12 @@ claude plugin validate .
 ## Tests
 
 - Offline tests (`tests/`) run without Fusion. `tests/conftest.py` stubs `adsk` with `MagicMock`. A test must be able to fail on the bug it targets.
-- Live smoke scripts (`tests/smoke/`) run inside Fusion through the Fusion MCP. pytest does not collect them. If a change touches geometry, run the relevant smoke script and report the result in the PR. If you could not run it, say so.
+- Live smoke scripts (`tests/smoke/`) run inside Fusion through the Fusion MCP. pytest does not collect them. If a change touches geometry, run the relevant smoke script and report the result in the PR. If you could not run it, say so. The offline tests cannot show that Fusion accepts a generated operation.
 
 ## Style
 
 - ruff: line length 120, target py312 (`pyproject.toml`).
-- Type hints: `list`, `dict`, `X | None`. Not `List`, `Optional`, `Union`.
+- Type hints: `list`, `dict`, `X | None`. Not `List`, `Optional`, `Union`. No `# type: ignore` and no `cast(Any)`.
 - Public helpers take mm; Fusion internals are cm. Convert at the boundary and say so in the docstring.
 - No try/except that swallows errors inside helpers.
 - Timeline items created by builders take `label=` (snake_case role; sketches end in `_sketch`).
@@ -74,7 +74,11 @@ Use the templates in `.github/ISSUE_TEMPLATE/`:
 3. Keep the change focused: one helper or one fix per PR where possible.
 4. Before opening the PR, run locally: ruff, pytest, the four hook selftests, `claude plugin validate .`.
 5. PR description: what changed, how you verified it, and whether live smoke ran in Fusion (state the Fusion version if it did).
-6. Add an entry under `## [Unreleased]` in `CHANGELOG.md`.
+6. No hand-written changelog entry. release-please generates `CHANGELOG.md` from commit and PR titles, so write a clear PR title.
+
+## Commits and releases
+
+Commits follow [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, `test:`. Add `!` after the type for a breaking change (`refactor!: ...`). PRs are squash-merged, so the PR title becomes the commit message and CI checks it. release-please reads those commits on `main` and keeps a release PR open with the version bump and changelog. Merging that release PR creates the `vX.Y.Z` tag and the GitHub release. Do not bump versions by hand.
 
 ## License
 

@@ -7,6 +7,8 @@ description: Build parametric Autodesk Fusion 360 models through the Fusion MCP 
 
 Geometry is produced by Python scripts sent to Fusion through the official Fusion MCP `execute` tool. `fusion_kit` is a helper layer over the Fusion API (`adsk`). Use its helpers first; drop to raw `adsk` only when no helper fits.
 
+Team workflow (agents, briefs, build loop, hooks): `${CLAUDE_PLUGIN_ROOT}/docs/workflow.md`.
+
 ## 1. Setup check
 
 Run through this list before the first `execute` in a session.

@@ -1,0 +1,94 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ~/.claude/agent-guard.py --reset"
+          },
+          {
+            "type": "command",
+            "command": "python ~/.claude/structure-guard.py --reset"
+          },
+          {
+            "type": "command",
+            "command": "python ~/.claude/state-hook.py --session"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ~/.claude/git-guard.py --hook"
+          },
+          {
+            "type": "command",
+            "command": "python ~/.claude/verify-nudge.py --commit"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ~/.claude/structure-guard.py"
+          },
+          {
+            "type": "command",
+            "command": "python ~/.claude/state-hook.py --guard"
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ~/.claude/agent-guard.py"
+          }
+        ]
+      }
+    ],
+    "PostToolBatch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ~/.claude/batch-nudge.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ~/.claude/review-nudge.py",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python ~/.claude/structure-nudge.py"
+          },
+          {
+            "type": "command",
+            "command": "python ~/.claude/verify-nudge.py"
+          },
+          {
+            "type": "command",
+            "command": "python ~/.claude/state-hook.py --stop"
+          }
+        ]
+      }
+    ]
+  }
+}

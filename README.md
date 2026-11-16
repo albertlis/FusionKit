@@ -4,72 +4,112 @@
 
 # FusionKit
 
-**Reliable, parametric Autodesk Fusion modelling for scripts and AI agents**
+Typed, millimetre-based helpers for parametric Autodesk Fusion models, with FDM print checks on every body.
 
 [![CI](https://github.com/albertlis/FusionKit/actions/workflows/ci.yml/badge.svg)](https://github.com/albertlis/FusionKit/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/albertlis/FusionKit)](https://github.com/albertlis/FusionKit/releases)
 ![license](https://img.shields.io/badge/license-FusionKit%201.0-blue)
 ![Python 3.12 | 3.14](https://img.shields.io/badge/python-3.12%20%7C%203.14-blue)
-![Autodesk Fusion](https://img.shields.io/badge/Autodesk%20Fusion-API-orange)
 ![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-purple)
 
 </div>
 
-FusionKit is a small helper library that sits between your code and the Autodesk Fusion API (`adsk`). It turns the raw API into typed, mm-based helpers that build parametric models, catch silent geometry loss, and check parts for FDM printability. It ships as a plain Python package and as a Claude Code plugin, so an AI agent drives Fusion through the same guard rails a careful engineer would use.
+[Why](#why-fusionkit) · [With Claude](#what-it-looks-like-with-claude) · [Requirements](#requirements) · [Quick start](#quick-start) · [Troubleshooting](#troubleshooting) · [Example](#example) · [Modules](#modules) · [FAQ](#faq)
 
-FusionKit runs inside Fusion's embedded Python. It depends only on the standard library and `adsk`.
+FusionKit sits between your code and the Autodesk Fusion API (`adsk`) and wraps it in helpers that take millimetres. It is tuned for FDM printing: the DfAM rules assume PETG, a 0.4 mm nozzle and 0.2 mm layers. `report` runs the DfAM rules on every body, with Z up as the print orientation. `printability.check_body` and `printability.sweep` are called explicitly, in a print orientation you choose. It ships as a Python package and as a Claude Code plugin.
 
-Fusion ships Python 3.14 (tested on 3.14.7); offline tests run on 3.12 and 3.14.
+## What it looks like with Claude
+
+With the plugin installed, Claude runs the build loop. A typical request:
+
+> Build a 90x60 mm PETG wall bracket with four M4 holes, printable without supports.
+
+Then Claude:
+
+1. Loads the `fusion-kit` skill. It holds the setup check, the build workflow and the verified Fusion gotchas.
+2. Reads the helper index, `docs/fusion_kit_api.md`, and uses a helper wherever a row fits.
+3. Writes the part script on `fusion_kit`. Every dimension is a User Parameter, and every timeline item gets a `label=`. It sends the script through the Fusion MCP `execute` tool, started by `run_part`.
+4. Reads the last line of `report`. Suppose it ends with `dfam=1F/0W` and prints `DFAM_FAIL bed_chamfer: ...`. Claude adds the missing bed chamfer and runs the script again.
+5. Tries to stop. The Stop hook (`dfam_guard`) blocks the stop while a `DFAM_FAIL` is open. It blocks once. The next stop passes, unless a new `DFAM_FAIL` came in.
+6. Once `report` is green, calls the `CadSimplifier` agent. It reads the timeline and returns a ranked list of ways to build the same geometry with fewer steps. It does not edit the design.
+
+This is a real `report` line from the demo bracket. It is not the output of the request above:
+
+```
+demo_bracket: bodies=1 lumps=1 bbox=90.0x60.0x40.0mm vol=42.139cm3 sketches=7/7 constrained design_timeline_unhealthy=0 timeline_unnamed=0 timeline_numbered=0 dfam=0F/0W
+```
+
+Most of the time lost with Fusion goes on rediscovering the same pitfalls in every session. The helper index, the API notes and the gotchas let Claude skip that search, so it needs fewer attempts. DfAM problems show up in the report before you slice, so fewer prints fail. Parameters make later changes cheap: you edit one value and the model rebuilds.
 
 ## Why FusionKit
 
-The raw Fusion API works, but it has sharp edges that cost hours when you hit them for the first time. FusionKit encodes the fixes once.
+The raw Fusion API works, but it has sharp edges. FusionKit encodes the fixes, so the next script starts from them.
 
 | The problem with the raw API | What FusionKit does |
 |---|---|
 | **Module cache across runs.** Fusion keeps `sys.modules` between `execute` calls, so an edited helper silently runs its old code. | `loader.run_part` purges `fusion_kit.*` and the part package before every run. |
 | **Sketch constraint jitter.** Dimensions on exactly shared coordinates trigger over-constraint errors and inferred H/V constraints. | `sketch.rect` and `sketch.param_poly` offset vertices safely and dimension them explicitly. |
 | **Internal units are cm.** `evaluateExpression(expr, "mm")` also returns cm, and `.value` is cm. | Every public helper takes mm and converts at the boundary. |
-| **Silent geometry loss.** A join after a hole cut closes the hole, and a chamfer on a concave edge does nothing without an error. | `report.report` prints bodies, lumps, bounding box and volume, and `convex_edges` and `chamfer_greedy` probe edges before they fail quietly. |
+| **Silent geometry loss.** A join after a hole cut closes the hole, and a chamfer on a concave edge does nothing without an error. | `report.report` prints bodies, lumps, bounding box and volume. `convex_edges` and `chamfer_greedy` probe edges before they fail quietly. |
 | **Timeline noise.** Features named by Fusion (`Extrude3`) make the timeline unreadable and the design hard to edit. | `label=` is mandatory on every builder. `report` prints `timeline_unnamed`, which must be 0. |
 | **Enum and expression pitfalls.** Typed enums are easy to misspell, and `round()` in expressions is not what Python does. | `enums` holds typed constants, and `expr` builds expressions with known behaviour. |
-| **3D-printing failures found late.** Overhangs and thin walls show up after printing. | `dfam` and `printability` run FDM (PETG) rule checks on every body, in print orientation. |
+| **3D-printing failures found late.** Overhangs and thin walls show up after printing. | `dfam` runs FDM (PETG) rule checks on every body. `printability` checks overhangs in a print orientation you choose. |
 
-The rules behind these helpers are not guesses. [`docs/gotchas.md`](docs/gotchas.md) lists **47 verified Fusion behaviours**, and the DfAM rules are documented in [`docs/dfam_guidelines.md`](docs/dfam_guidelines.md).
+The DfAM thresholds are FusionKit defaults; [`docs/dfam_guidelines.md`](docs/dfam_guidelines.md) gives each rule's source.
 
-## Features
+## What a run looks like
 
-**Parametric building blocks**
+Every part script ends with `report.report(comp)`. It prints one summary line per component, then one line per DfAM finding. This is the summary from a live run of the demo bracket:
 
-- `sketch`: create sketches on named planes or faces, add dimensioned rectangles and circles, anchor points to the origin, and keep profiles fully constrained.
-- `features`: extrude, revolve, fillet, chamfer, combine (join, cut, intersect), mirror, rectangular, circular and grid patterns, and offset planes. Profiles are selected by geometry, not by index.
-- `holes`: simple, counterbore and countersink holes, screw slots with clearance, teardrop holes for horizontal bores, and seam notches.
-- `joints`: dovetail profiles and joints, with clearances and mating-face marking.
-- `user_params` and `expr`: create User Parameters from a single spec dictionary, and build parametric lengths and expressions that stay live.
+```
+demo_bracket: bodies=1 lumps=1 bbox=90.0x60.0x40.0mm vol=42.139cm3 sketches=7/7 constrained design_timeline_unhealthy=0 timeline_unnamed=0 timeline_numbered=0 dfam=0F/0W
+```
 
-**Script infrastructure**
+Check each field:
 
-- `loader`: runs a part entry file with a clean module cache.
-- `steps`: runs a build as a sequence of steps, each in its own `execute` call, so long builds stay under the MCP timeout.
-- `timeline`: labels timeline items, checks label rules, and dumps timeline health.
-- `component` and `view`: create sub-components, set view orientation, and save a 600x400 PNG with a fixed camera.
-- `enums`: typed constants for Fusion enums (feature operations, extents, pattern types, point containment).
+- `bodies` and `lumps`: a body count that drops after a join or cut means geometry was lost.
+- `bbox` and `vol`: compare them with the numbers you expect from the parameters.
+- `sketches=N/M constrained`: every sketch should be fully constrained.
+- `design_timeline_unhealthy=0`: no feature has failed.
+- `timeline_unnamed=0`: must be zero. `timeline_numbered` lists `x_1..x_n` names, which often mark a pattern that should have been a seed. Justify it or replace it.
+- `dfam=<nF>F/<nW>W`, plus the `DFAM_FAIL` and `DFAM_WARN` lines. Each finding names its rule, as described below. A clean summary with a `DFAM_FAIL` line under it is not a pass.
 
-**Verification and manufacturing**
+## What it catches
 
-- `report`: one-line self-check per component, plus world-space bounding boxes, point and interior probes, pairwise interference, and overhang scans.
-- `printability`: orientation sweeps, overhang and bed-contact checks, wall thickness, and line-of-sight ray checks on a triangle mesh of the body.
-- `dfam`: FDM rule scan per body (teardrop holes, bed chamfers, warp grooves, vertical corners, minimum walls, PETG wall thickness and more). FAIL findings block the Claude Code Stop hook. A body can opt out of a rule with the `dfam_skip` attribute and a written reason.
+FusionKit checks every body against FDM rules for PETG, in print orientation. FAIL findings make the Claude Code Stop hook block the session once. WARN findings are only printed. `printability.check_body` finds overhangs past 45°, hanging edges and floating points in a chosen print orientation, and `printability.sweep` ranks several orientations. You call these helpers yourself; `report` does not run them. These are the six rules you will meet most often:
 
-Every public helper is listed with its signature in [`docs/fusion_kit_api.md`](docs/fusion_kit_api.md). Each row there is enforced by an offline test.
+- **`teardrop`**: a horizontal hole needs a pointed roof (a teardrop peak), so the top does not sag.
+- **`seam_notch`**: a vertical hole needs a 0.3 mm V notch. The notch points +Y by default.
+- **`bed_chamfer`**: edges on the bed face need a real chamfer, about 1 mm (0.5 mm in tight spots); a fillet fails.
+- **`warp_grooves`**: a bed face wider than 35 mm needs relief grooves, 0.8 × 0.3 mm on a 30 mm pitch, to reduce warping.
+- **`vertical_corner`**: a sharp vertical corner fails. Use a chamfer, or a fillet of 3 mm or more.
+- **`petg_wall`**: a vertical wall between 0.9 and 1.6 mm fails. That band is two 0.45 mm perimeters, so the result depends on your slicer settings.
+
+A body can opt out of a rule with the `dfam_skip` attribute and a written reason, for example `teardrop:no horizontal hole here`. The skip is printed, so it stays visible.
+
+<div align="center">
+<img src="docs/img/underside.png" alt="Underside of the demo bracket: warp relief grooves and mounting holes" width="720">
+
+<sub>Underside: 0.8 x 0.3 mm warp relief grooves on a 30 mm pitch, and the four mounting holes.</sub>
+</div>
+
+The full rule table, with sources and the rules that are advisory only, is in [`docs/dfam_guidelines.md`](docs/dfam_guidelines.md).
+
+## Requirements
+
+- **Autodesk Fusion**, with the Fusion MCP server enabled under **Preferences > General > API**. The free Personal plan works. Fusion has to stay open for every run.
+- **Claude Code**, for the plugin path. No Python install is needed for it.
+- **uv**, only for development (`uv sync --group dev`).
+- **Python**: Fusion ships Python 3.14 (tested on 3.14.7). FusionKit depends only on the standard library and `adsk`. The offline tests run on 3.12 and 3.14.
+- **Platform**: tested on Windows only. We have not tried macOS. The offline tests also run in CI on Ubuntu, but that is not a Fusion test.
+
+Every change is logged in [CHANGELOG.md](CHANGELOG.md).
 
 ## Quick start
 
-FusionKit needs Fusion open with its MCP server enabled. Both quick starts assume that.
+Open Autodesk Fusion. Then go to **Preferences > General > API** and enable the Fusion MCP server. Its endpoint is `127.0.0.1:27182/mcp` (plain HTTP, local only).
 
-1. Open Autodesk Fusion. It works on the free Personal plan.
-2. Go to **Preferences > General > API** and enable the Fusion MCP server. Its endpoint is `127.0.0.1:27182/mcp` (plain HTTP, local only).
-
-### A. Claude Code plugin
+### 1. Install the Claude Code plugin
 
 In Claude Code, add the marketplace and install the plugin:
 
@@ -78,17 +118,33 @@ In Claude Code, add the marketplace and install the plugin:
 /plugin install fusion-kit@fusionkit
 ```
 
-The plugin wires up the Fusion MCP server (`.mcp.json`), the `fusion-kit` skill, the `CadSimplifier` review agent and four hooks. The skill finds FusionKit through the `FUSIONKIT_PATH` environment variable. If it is not set, the skill uses the plugin root. The plugin cache path changes between plugin versions, so setting the variable persistently is the safer choice. On Windows:
+No Python install is needed for this path. The plugin contents are listed under [Plugin contents](#plugin-contents). For the optional `fusion-cad` MCP server, see [Recommended MCP stack](#recommended-mcp-stack).
+
+### 2. Set `FUSIONKIT_PATH`
+
+The skill finds FusionKit through the `FUSIONKIT_PATH` environment variable. If it is not set, the skill falls back to the plugin root. The plugin cache path changes between plugin versions, so we recommend setting the variable permanently. On Windows:
 
 ```
 setx FUSIONKIT_PATH "C:\path\to\FusionKit"
 ```
 
-Restart Fusion afterwards, because a running process does not see new environment variables.
+Restart Fusion afterwards. A running process does not see new environment variables.
 
-For the optional `fusion-cad` MCP server, see [Recommended MCP stack](#recommended-mcp-stack).
+### 3. Run the demo
 
-### B. Manual install
+In Claude Code, ask:
+
+> Run the FusionKit demo bracket
+
+Create a new design document in Fusion first. The demo writes into the open document, so do not run it on a document you need to keep.
+
+If the report ends with `dfam=0F/0W` and the bracket appears in Fusion, the setup works. Step names for partial runs: [demo README](examples/demo_bracket/README.md#run).
+
+### Without the plugin
+
+This is the manual path. It needs no Claude Code.
+
+Clone the repo and sync the dev environment:
 
 ```bash
 git clone https://github.com/albertlis/FusionKit.git
@@ -96,7 +152,7 @@ cd FusionKit
 uv sync --group dev
 ```
 
-Set `FUSIONKIT_PATH` to the FusionKit root (the directory that contains `fusion_kit/`). Then start every Fusion script through the loader:
+Set `FUSIONKIT_PATH` to the FusionKit root, the directory that contains `fusion_kit/`. Then start every Fusion script through the loader:
 
 ```python
 import os
@@ -113,13 +169,20 @@ def run(_context):
     run_part(r"C:\path\to\my_bracket\my_bracket.py", "")
 ```
 
-Send this through the Fusion MCP `execute` tool, or paste it into Fusion's **Scripts and Add-Ins** dialog. Do not `import fusion_kit` at the top level of an `execute` script. The module cache then keeps stale helpers between runs.
+Send this through the Fusion MCP `execute` tool, or paste it into Fusion's **Scripts and Add-Ins** dialog. Do not put `import fusion_kit` at the top level of an `execute` script. The module cache keeps stale helpers between runs, and the loader prevents that.
 
 Entry files must define `def run(_context)`. The loader expects the layout `<project>/<pkg>/<pkg>.py`, with optional `parts/` and `anim/` subfolders.
 
+## Troubleshooting
+
+- **MCP call fails with `ECONNREFUSED`.** The Fusion MCP server has stopped. Check that Fusion is open and that the API is enabled under **Preferences > General > API**. Then restart Fusion.
+- **An edited helper still runs its old code.** Fusion keeps modules between runs. Start every script through `loader.run_part`, which purges `fusion_kit.*` first. `loader.py` is cached too: after you change it, restart Fusion.
+- **`FUSIONKIT_PATH` is not seen.** A running process does not see new environment variables. Restart Fusion after `setx`.
+- **`ModuleNotFoundError: fusion_kit` at the top of a script.** Move the import inside `run()`, after the `sys.path` insert.
+
 ## Example
 
-A 60 x 30 x 4 mm plate with two bosses, patterned along the plate edge. Each entry is parametric, so changing `plate_length` in Fusion rebuilds the part. The file is `my_bracket/my_bracket.py`, run through `run_part` as shown above. Because the loader adds the FusionKit root to `sys.path` before it executes the entry file, the top-level `fusion_kit` imports below are safe.
+This is a 60 x 30 x 4 mm plate with two bosses, patterned along the plate edge. Every dimension is a User Parameter, so changing `plate_length` in Fusion rebuilds the part. The file is `my_bracket/my_bracket.py`, run through `run_part` as shown above. The loader adds the FusionKit root to `sys.path` before it runs the entry file, so the top-level `fusion_kit` imports below are safe.
 
 ```python
 import adsk.core
@@ -176,57 +239,41 @@ def run(_context: str) -> None:
     report.report(comp)
 ```
 
-Two notes on the example:
+Two things to notice:
 
-- Every dimension is a User Parameter. The helpers take expression strings, so the model stays editable from the Fusion parameters dialog.
+- Every dimension is a User Parameter. The helpers take expression strings, so the model stays editable.
 - `label=` names each timeline item (`plate`, `boss`, `boss_row`, `plate_sketch`). That is why `report` shows zero unnamed items.
 
 ## Demo
 
-[`examples/demo_bracket/`](examples/demo_bracket/README.md) is a printable PETG bracket built only from FusionKit helpers: a 90 x 60 x 5 mm plate with four mounting holes, a 40 mm wall with a gable-roof slot, two gussets, and the DfAM treatment for each feature.
+[`examples/demo_bracket/`](examples/demo_bracket/README.md) is a printable PETG bracket built only from FusionKit helpers. What it shows:
 
-<div align="center">
-<img src="docs/img/underside.png" alt="Underside of the demo bracket: warp relief grooves and mounting holes" width="720">
-
-<sub>Underside: 0.8 x 0.3 mm warp relief grooves on a 30 mm pitch, and the four mounting holes.</sub>
-</div>
-
-What it shows:
-
-- **Pattern holes:** one mounting hole, cut last to avoid closing it, repeated with `features.pattern_grid`.
+- **Pattern holes:** one mounting hole, cut last so it does not close, repeated with `features.pattern_grid`.
 - **Fillets and chamfers:** r 3 mm fillets on the outer vertical corners, 0.5 mm chamfers on the slot corners.
-- **Bed chamfer:** 46 degree chamfer on the bed edge, the steepest angle the DfAM rule allows.
-- **Warp relief grooves:** 0.8 x 0.3 mm grooves in the bed face to reduce warping of the large flat base.
-- **Gable-roof slot:** a pointed 46.8 degree roof, so the slot has no flat ceiling.
+- **Bed chamfer:** a 46° chamfer on the bed edge, the `features.bed_chamfer` default, which keeps the face inside the 45° overhang limit.
+- **Warp relief grooves** and a **pointed gable-roof slot** (46.8°, no flat ceiling).
 - **Self-check:** `report` ends with no DfAM findings, and `printability.check_body(min_angle_deg=45)` passes.
 
-Sample `report()` output from a live run:
+Build steps: [demo README](examples/demo_bracket/README.md).
 
-```
-demo_bracket: bodies=1 lumps=1 bbox=90.0x60.0x40.0mm vol=42.139cm3 sketches=7/7 constrained design_timeline_unhealthy=0 timeline_unnamed=0 timeline_numbered=0 dfam=0F/0W
-```
+## Modules
 
-To run it, use the bootstrap from [Manual install](#b-manual-install) with `examples/demo_bracket/demo_bracket.py` as the entry. The [demo README](examples/demo_bracket/README.md#run) has the exact snippet and the step names for partial runs.
+| Module | What it is for |
+|---|---|
+| `sketch` | Dimensioned rectangles and circles, anchors, constrained profiles. |
+| `features` | Extrude, revolve, fillet, chamfer, combine, mirror, patterns. Profiles picked by geometry. |
+| `holes` | Simple, counterbore and countersink holes, screw slots, teardrop holes, seam notches. |
+| `joints` | Dovetail profiles and joints with clearances. |
+| `user_params`, `expr` | User Parameters and live expressions. |
+| `loader`, `steps`, `timeline` | Clean module cache, stepped builds, timeline labels and health. |
+| `component`, `view`, `enums` | Sub-components, view orientation, PNG screenshots, typed enums. |
+| `report`, `printability`, `dfam` | Self-check line, probes, interference, overhangs, FDM rule scan. |
 
-## What report() prints
+Every public helper is listed with its signature in [`docs/fusion_kit_api.md`](docs/fusion_kit_api.md). An offline test checks the format of every row.
 
-`report.report(comp)` ends every part script. It prints one line per component, then one line per DfAM finding. The sample below is illustrative. The field names and formats come from `fusion_kit/report.py` and `hooks/dfam_guard.py`, but the values are invented.
+## How we work with Claude
 
-```
-bracket: bodies=1 lumps=1 bbox=60.0x30.0x4.0mm vol=6.240cm3 sketches=2/2 constrained design_timeline_unhealthy=0 timeline_unnamed=0 timeline_numbered=0 dfam=0F/1W
-DFAM_WARN <rule>: <message about one body>
-```
-
-What to check:
-
-- `bodies` and `lumps`: a body count that drops after a join or cut means geometry was lost.
-- `bbox` and `vol`: compare against the numbers you expect from the parameters.
-- `sketches=N/Mconstrained`: every sketch should be fully constrained.
-- `design_timeline_unhealthy=0`: no feature has failed.
-- `timeline_unnamed=0`: must be zero. `timeline_numbered` lists `x_1..x_n` names, which often mark a pattern that should have been a seed. Justify it or replace it.
-- `dfam=<nF>F/<nW>W` and the `DFAM_FAIL` and `DFAM_WARN` lines: each finding names the rule. A FAIL blocks the Claude Code Stop hook until it is fixed or opted out.
-
-Read the output. A green line with a FAIL below it is not a pass.
+The working setup (Opus manager, Haiku workers, Adversary review loop, hooks) is described in [`docs/workflow.md`](docs/workflow.md).
 
 ## Recommended MCP stack
 
@@ -241,126 +288,61 @@ Install `fusion-cad-mcp` by following its own README. The plugin's `.mcp.json` r
 
 ## Plugin contents
 
-The Claude Code plugin (`.claude-plugin/plugin.json`, marketplace `fusionkit`) contains the following.
+The Claude Code plugin (`.claude-plugin/plugin.json`, marketplace `fusionkit`) contains:
 
-**Skill**
-
-- `skills/fusion-kit/SKILL.md`: the setup check, the script bootstrap, the project layout, the build workflow, design-intent rules, tool routing, the eight most important gotchas and the missing-helper process.
-
-**Agent**
-
-- `agents/CadSimplifier.md`: a read-only design-intent reviewer. Its frontmatter sets `name: CadSimplifier`, `effort: low`, a read-only tool list and `omitClaudeMd: true`. It reads the live timeline with one read-only `execute` call, looks for repeated features, symmetric halves and per-instance formulas, and returns a ranked recipe. It does not change the design.
-
-**Hooks** (`hooks/hooks.json`)
-
-- `fusion_kit_nudge.py` (PreToolUse on Fusion `execute` and on `Write`/`Edit` of part files): flags raw `adsk` calls that already have a `fusion_kit` helper. It never blocks.
-- `fusion_kit_brief_guard.py` (PreToolUse on `Agent`): denies, once per session, a sub-agent brief that concerns Fusion but does not reference `docs/fusion_kit_api.md`.
-- `dfam_guard.py` (PostToolUse on `execute` and Stop): parses `report()` output and blocks Stop while DfAM FAIL findings remain.
-- `cad_simplify_nudge.py` (PostToolUse on `execute`, `Agent`, `Write` and `Edit`, and Stop): reminds you to run `CadSimplifier` after a part's `report()` is green and before a commit.
-
-**MCP configuration**
-
-- `.mcp.json`: the `autodesk-fusion` HTTP server and the optional `fusion-cad` stdio server.
-
-## Type checking with Autodesk stubs
-
-Fusion's Python stubs catch calls to API members that do not exist. They are not part of this repository. Create a gitignored junction once, pointing at the stubs that Fusion installs:
-
-```
-mklink /J .fusion_defs "%APPDATA%\Autodesk\Autodesk Fusion 360\API\Python\defs"
-```
-
-Then run the static check before each `execute`:
-
-```
-uvx basedpyright fusion_kit
-```
-
-The junction is read-only in practice: never edit files inside it. FusionKit's own code uses `list`, `dict` and `X | None` type hints, and does not use `# type: ignore` or `cast(Any)`.
-
-## Testing
-
-Offline tests run without Fusion. `tests/conftest.py` stubs the `adsk` package with `MagicMock`, so the helpers' logic is tested without geometry. A test must be able to fail on the bug it targets.
-
-```
-uv sync --group dev
-uv run pytest -q
-uv run ruff check .
-```
-
-Live smoke scripts in `tests/smoke/` run inside Fusion through the MCP server. pytest does not collect them. A change that touches geometry needs a smoke run in Fusion, and the result must be reported. The offline tests cannot show that Fusion accepts a generated operation.
-
-CI (`.github/workflows/ci.yml`) runs ruff and pytest on Ubuntu and Windows with Python 3.12 and 3.14, and it runs the four hook self-tests:
-
-```
-python hooks/cad_simplify_nudge.py --selftest
-python hooks/dfam_guard.py --selftest
-python hooks/fusion_kit_brief_guard.py --selftest
-python hooks/fusion_kit_nudge.py --selftest
-```
-
-Plugin manifest check:
-
-```
-claude plugin validate .
-```
-
-(the root CLAUDE.md warning is expected: it is the contributor guide, not plugin context)
-
-## Documentation
-
-- [`docs/fusion_kit_api.md`](docs/fusion_kit_api.md): helper index. Every public helper, its signature and the raw `adsk` calls it wraps. Read it before writing a part.
-- [`docs/gotchas.md`](docs/gotchas.md): 47 verified Fusion behaviours, grouped by units and parameters, sketches, features, bodies and geometry, assemblies and joints, MCP execution and documents, and performance.
-- [`docs/dfam_guidelines.md`](docs/dfam_guidelines.md): FDM and PETG rules, which are FAIL and which are WARN, and their sources.
-- [`CONVENTIONS.md`](CONVENTIONS.md): repository layout, naming and vocabulary.
-- [`CLAUDE.md`](CLAUDE.md): the repository map and the rules this repo follows.
-
-## Roadmap
-
-These are plans, not commitments.
-
-- More DfAM rules, and better coverage of the rules that currently only appear as reference notes.
-- Assembly and joint helpers beyond the current dovetail, built on the same verified-behaviour process.
-- Installation without a Python package index: updates arrive through plugin updates.
+- **Skill:** `skills/fusion-kit/SKILL.md`, the setup check, build workflow, design-intent rules and tool routing.
+- **Agent:** `agents/CadSimplifier.md`, a read-only design-intent reviewer. It returns a ranked recipe and does not change the design.
+- **Hooks:** four hooks, wired in `hooks/hooks.json`.
+- **MCP configuration:** `.mcp.json`, the Fusion and optional `fusion-cad` servers described above.
 
 ## Contributing
 
-Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first. In short:
+Read [CONTRIBUTING.md](CONTRIBUTING.md) first. It covers dev setup, tests, the Autodesk stub check, the helper checklist and commit rules.
 
-1. For non-trivial changes, open an issue first. Use the bug, feature or missing-helper template.
-2. Branch from `main`, and keep each pull request to one helper or one fix.
-3. Before you open a pull request, run `uv run ruff check .`, `uv run pytest -q`, the four hook self-tests and `claude plugin validate .`.
-4. A new public helper needs a row in `docs/fusion_kit_api.md`, an offline test, a live smoke test if it touches geometry, and a measured entry in `docs/gotchas.md`.
-5. Add an entry under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md).
+For anything non-trivial, open an issue first. Offline tests and ruff run in CI on Ubuntu and Windows with Python 3.12 and 3.14. The hook self-tests run on Ubuntu with Python 3.12 only. A change that touches geometry also needs a live smoke run in Fusion, because the offline tests cannot show that Fusion accepts a generated operation.
 
-Contributions are licensed under the FusionKit License 1.0 (see below).
+## Documentation
+
+- [`docs/fusion_kit_api.md`](docs/fusion_kit_api.md): the helper index, with signatures and the raw `adsk` calls each helper wraps. Read it before you write a part.
+- [`docs/gotchas.md`](docs/gotchas.md): verified Fusion behaviours.
+- [`docs/dfam_guidelines.md`](docs/dfam_guidelines.md): FDM and PETG rules, FAIL and WARN, with sources.
+- [`CONVENTIONS.md`](CONVENTIONS.md): repository layout, naming and vocabulary.
+- [`CLAUDE.md`](CLAUDE.md): the repository map and rules.
+
+## Roadmap
+
+Open work:
+
+- More DfAM rules, and rules that are advisory only today.
+- Assembly and joint helpers beyond the dovetail.
 
 ## License and attribution
 
-FusionKit is licensed under the **FusionKit License 1.0** (source-available, noncommercial, attribution required). The full text is in [LICENSE](LICENSE).
+FusionKit is licensed under the **FusionKit License 1.0**: source-available, noncommercial, with attribution required. The full text is in [LICENSE](LICENSE).
 
-In short:
-
-- Noncommercial use, personal use, research and use by charitable, educational and public organizations are permitted purposes.
-- The Attribution section requires that any project, design, model, file, publication, video or repository you create with FusionKit displays a clear credit reading **Built with FusionKit (https://github.com/albertlis/FusionKit)**. For source repositories, put it in the README.
-
-Add this line to the README of any project that uses FusionKit:
+Projects built with FusionKit must credit it. For source repositories, put this line in the README:
 
 ```markdown
 Built with FusionKit (https://github.com/albertlis/FusionKit)
 ```
 
-To show the credit as a badge, paste this:
+## FAQ
 
-```markdown
-[![Built with FusionKit](https://img.shields.io/badge/Built%20with-FusionKit-blue)](https://github.com/albertlis/FusionKit)
-```
+**Does it work on the free Fusion Personal plan?**
+Yes. The Fusion MCP server is available there, and FusionKit runs through it.
+
+**Can I use it commercially?**
+No, not under the FusionKit License 1.0. Commercial use needs a separate license from the author.
+
+**Why not call `adsk` directly?**
+You can, and for a one-off script that is fine. FusionKit pays off when the same problems keep coming back: the module cache, cm units, unnamed timeline items and printing failures found late.
+
+**Does it need Claude?**
+No. The loader, the helpers and `report` work without the plugin, which adds the skill, the agent and the hooks.
 
 ## Acknowledgements
 
-- The Autodesk Fusion API and its embedded Python environment.
 - [fusion-cad-mcp](https://github.com/Mfrostbutter/fusion-cad-mcp) by Mfrostbutter, the optional typed tool layer described above.
-- The Claude Code plugin system, which carries the skill, agent and hooks.
 
 ## Disclaimer
 
