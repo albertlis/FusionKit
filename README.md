@@ -120,7 +120,17 @@ In Claude Code, add the marketplace and install the plugin:
 
 No Python install is needed for this path. The plugin contents are listed under [Plugin contents](#plugin-contents). For the optional `fusion-cad` MCP server, see [Recommended MCP stack](#recommended-mcp-stack).
 
-### 2. Run the demo
+### 2. Add the Fusion MCP server to Claude Code
+
+The plugin does not register MCP servers. Add the Fusion server yourself:
+
+```
+claude mcp add --transport http autodesk-fusion http://127.0.0.1:27182/mcp
+```
+
+Use the name `autodesk-fusion` exactly. The skill, the `CadSimplifier` agent and the hooks refer to that name. Add `--scope user` to make the server available in every project. For the optional `fusion-cad` server, see [Recommended MCP stack](#recommended-mcp-stack).
+
+### 3. Run the demo
 
 In Claude Code, ask:
 
@@ -171,6 +181,7 @@ Entry files must define `def run(_context)`. The loader expects the layout `<pro
 ## Troubleshooting
 
 - **MCP call fails with `ECONNREFUSED`.** The Fusion MCP server has stopped. Check that Fusion is open and that the API is enabled under **Preferences > General > API**. Then restart Fusion.
+- **The `mcp__autodesk-fusion__*` tools are missing.** The server is not registered under that name. Run `claude mcp list`. If `autodesk-fusion` is absent, add it with the command in [step 2](#2-add-the-fusion-mcp-server-to-claude-code).
 - **An edited helper still runs its old code.** Fusion keeps modules between runs. Start every script through `loader.run_part`, which purges `fusion_kit.*` first. `loader.py` is cached too: after you change it, restart Fusion.
 - **Your `FUSIONKIT_PATH` is not seen.** This applies only when you set it, for example to a dev clone. A running process does not see new environment variables. Restart Fusion after `setx`.
 - **`ModuleNotFoundError: fusion_kit` at the top of a script.** Move the import inside `run()`, after the `sys.path` insert.
@@ -279,7 +290,13 @@ FusionKit runs scripts through Fusion's own MCP server. A second server is optio
 | **Autodesk Fusion MCP** (`autodesk-fusion`, `127.0.0.1:27182/mcp`) | Built into Fusion, enabled under **Preferences > General > API**. Gives `fusion_mcp_execute` for scripts and document operations, `fusion_mcp_read` for screenshots, documents and API docs, and `fusion_mcp_update` for undo and redo. | Yes |
 | **fusion-cad-mcp** ([github.com/Mfrostbutter/fusion-cad-mcp](https://github.com/Mfrostbutter/fusion-cad-mcp), MIT) | A typed tool layer in front of the Fusion MCP server. Adds measurement tools (`measure`, `bounding_box`, `volume`, `mass`), `interference_check`, `drive_joint` for moving parts, `audit_feature_health`, and knowledge lookups (`find_gotcha`, `find_pattern`, `find_api`). Optional, but the skill and `CadSimplifier` use it when present. | No |
 
-Install `fusion-cad-mcp` by following its own README. The plugin's `.mcp.json` registers it as the server `fusion-cad`, which runs the command `fusion-cad-mcp`.
+Install `fusion-cad-mcp` by following its own README. Then add it to Claude Code under the name `fusion-cad`, which runs the command `fusion-cad-mcp`:
+
+```
+claude mcp add --transport stdio fusion-cad -- fusion-cad-mcp
+```
+
+The name `fusion-cad` is required, because the skill and the hooks refer to it. Both servers are configured by you. The plugin does not register either one.
 
 ## Plugin contents
 
@@ -288,7 +305,8 @@ The Claude Code plugin (`.claude-plugin/plugin.json`, marketplace `fusionkit`) c
 - **Skill:** `skills/fusion-kit/SKILL.md`, the setup check, build workflow, design-intent rules and tool routing.
 - **Agent:** `agents/CadSimplifier.md`, a read-only design-intent reviewer. It returns a ranked recipe and does not change the design.
 - **Hooks:** four hooks, wired in `hooks/hooks.json`.
-- **MCP configuration:** `.mcp.json`, the Fusion and optional `fusion-cad` servers described above.
+
+The plugin ships no MCP server configuration. See [Quick start](#quick-start) and [Recommended MCP stack](#recommended-mcp-stack) for adding the servers.
 
 ## Contributing
 

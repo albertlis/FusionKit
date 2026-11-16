@@ -5,7 +5,7 @@ Guidance for Claude Code working ON the FusionKit repository. To build Fusion mo
 ## What this repo is
 
 - `fusion_kit/`: helper library for Autodesk Fusion scripts. Fusion runs it with its embedded Python, so it uses stdlib + `adsk` only. No third-party imports.
-- Claude Code plugin: skill, `CadSimplifier` agent, four hooks, MCP config.
+- Claude Code plugin: skill, `CadSimplifier` agent, four hooks. No MCP config: users register the servers.
 - Public repo. No personal data, private project names, user names or machine paths in code, docs, tests or hooks.
 
 ## Repo map
@@ -19,7 +19,7 @@ Guidance for Claude Code working ON the FusionKit repository. To build Fusion mo
 - `hooks/`: `fusion_kit_nudge.py`, `fusion_kit_brief_guard.py`, `dfam_guard.py`, `cad_simplify_nudge.py`, wired in `hooks/hooks.json`. Each supports `--selftest`.
 - `skills/fusion-kit/SKILL.md`: skill for Fusion modelling sessions.
 - `agents/CadSimplifier.md`: read-only timeline review agent.
-- `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.mcp.json`: plugin manifest, marketplace entry, MCP servers.
+- `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`: plugin manifest, marketplace entry.
 - `.github/`: CI (`workflows/ci.yml`) and issue templates.
 - `CONTRIBUTING.md`, `CHANGELOG.md`, `CITATION.cff`, `PRIVACY.md`, `LICENSE`.
 
@@ -63,5 +63,6 @@ CI runs `ruff check`, `pytest` and the four hook selftests (`cad_simplify_nudge`
 
 ## MCP
 
+- The plugin registers no MCP servers. Users add `autodesk-fusion` (HTTP) and optional `fusion-cad` (stdio) with `claude mcp add`. The names are fixed: the skill, `CadSimplifier` and the hook matchers refer to them.
 - Official Autodesk Fusion MCP, built into Fusion (Preferences > General > API), endpoint `http://127.0.0.1:27182/mcp`. Tools: `fusion_mcp_execute` (scripts; `readOnly: true` for inspection), `fusion_mcp_read` (screenshot, document, apiDocumentation; read before guessing an API), `fusion_mcp_update` (undo, redo).
 - fusion-cad MCP (`https://github.com/Mfrostbutter/fusion-cad-mcp`, MIT, optional): typed operations plus `measure`, `bounding_box`, `volume`, `interference_check`, `audit_feature_health`, `drive_joint`, `find_gotcha`, `find_pattern`, `find_api`. Used for verification. FusionKit does not depend on it.

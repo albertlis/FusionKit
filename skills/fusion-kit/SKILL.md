@@ -15,8 +15,9 @@ Run through this list before the first `execute` in a session.
 
 1. **Fusion MCP server.** Fusion must be open. Enable it in Preferences > General > API. Endpoint: `http://127.0.0.1:27182/mcp`. Works on the free Personal plan.
    - Tools: `fusion_mcp_execute` (scripts, document operations), `fusion_mcp_read` (screenshot, document, apiDocumentation), `fusion_mcp_update` (undo, redo).
+   - Not registered by the plugin. The user adds it to Claude Code: `claude mcp add --transport http autodesk-fusion http://127.0.0.1:27182/mcp`. The name must be `autodesk-fusion`, because the hooks and `CadSimplifier` match tools by that name.
    - `ECONNREFUSED` means the MCP server died. Ask the user to restart Fusion.
-2. **fusion-cad MCP (optional, recommended).** `https://github.com/Mfrostbutter/fusion-cad-mcp`. Wired in the plugin `.mcp.json` as server `fusion-cad` (command `fusion-cad-mcp`); install it per its README. Provides typed operations and measurement tools (see section 6).
+2. **fusion-cad MCP (optional, recommended).** `https://github.com/Mfrostbutter/fusion-cad-mcp`. Not registered by the plugin. The user installs it per its README and adds it to Claude Code as server `fusion-cad` (command `fusion-cad-mcp`), because the hooks and agents match tools by that name. Provides typed operations and measurement tools (see section 6).
 3. **`FUSIONKIT_PATH`, optional.** If set, it must be the FusionKit root, the directory that contains `fusion_kit/`. If unset, use `${CLAUDE_PLUGIN_ROOT}`, which Claude Code substitutes with the real plugin install path when this skill loads. Do not ask the user to set it. A user may set it to a dev clone to override the plugin copy; a running Fusion does not see new environment variables, so restart Fusion after `setx`.
 4. **Autodesk stubs for type checking (optional).** Create a gitignored junction `.fusion_defs` in the project root pointing at `%APPDATA%\Autodesk\Autodesk Fusion 360\API\Python\defs` (`mklink /J .fusion_defs "<defs path>"`). Add it to `extraPaths` in `pyrightconfig.json`. Never edit files inside the junction.
 

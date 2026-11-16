@@ -2,7 +2,7 @@
 name: CadSimplifier
 description: "Fusion 360 design-intent reviewer. Reads the live TIMELINE of the open design (one read-only execute, no code reading) and reports where the model could be built with fewer sketches/features: repeated features -> pattern, symmetric halves -> mirror / symmetric extent, many sketches -> one multi-profile sketch, per-instance formulas -> one parameter. Returns a ranked recipe (what to replace, with which feature, steps before/after, which fusion_kit helper). Read-only. Call after a part's report() is green, before commit."
 effort: low
-tools: [Read, Glob, ToolSearch, mcp__autodesk-fusion__fusion_mcp_execute, mcp__autodesk-fusion__fusion_mcp_read, mcp__fusion-cad__find_pattern, mcp__fusion-cad__find_gotcha, mcp__fusion-cad__find_api, mcp__plugin_fusion-kit_autodesk-fusion__fusion_mcp_execute, mcp__plugin_fusion-kit_autodesk-fusion__fusion_mcp_read, mcp__plugin_fusion-kit_fusion-cad__find_pattern, mcp__plugin_fusion-kit_fusion-cad__find_gotcha, mcp__plugin_fusion-kit_fusion-cad__find_api]
+tools: [Read, Glob, ToolSearch, mcp__autodesk-fusion__fusion_mcp_execute, mcp__autodesk-fusion__fusion_mcp_read, mcp__fusion-cad__find_pattern, mcp__fusion-cad__find_gotcha, mcp__fusion-cad__find_api]
 omitClaudeMd: true
 ---
 
