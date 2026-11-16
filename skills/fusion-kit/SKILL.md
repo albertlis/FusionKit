@@ -17,7 +17,7 @@ Run through this list before the first `execute` in a session.
    - Tools: `fusion_mcp_execute` (scripts, document operations), `fusion_mcp_read` (screenshot, document, apiDocumentation), `fusion_mcp_update` (undo, redo).
    - `ECONNREFUSED` means the MCP server died. Ask the user to restart Fusion.
 2. **fusion-cad MCP (optional, recommended).** `https://github.com/Mfrostbutter/fusion-cad-mcp`. Wired in the plugin `.mcp.json` as server `fusion-cad` (command `fusion-cad-mcp`); install it per its README. Provides typed operations and measurement tools (see section 6).
-3. **`FUSIONKIT_PATH`.** Must be the FusionKit root, the directory that contains `fusion_kit/`. Default: `${CLAUDE_PLUGIN_ROOT}`, substituted when this skill loads. The plugin cache path changes between plugin versions, so if the variable is not set, tell the user to set it persistently, for example `setx FUSIONKIT_PATH "<FusionKit root>"`, then restart Fusion (a running process does not see new environment variables).
+3. **`FUSIONKIT_PATH`, optional.** If set, it must be the FusionKit root, the directory that contains `fusion_kit/`. If unset, use `${CLAUDE_PLUGIN_ROOT}`, which Claude Code substitutes with the real plugin install path when this skill loads. Do not ask the user to set it. A user may set it to a dev clone to override the plugin copy; a running Fusion does not see new environment variables, so restart Fusion after `setx`.
 4. **Autodesk stubs for type checking (optional).** Create a gitignored junction `.fusion_defs` in the project root pointing at `%APPDATA%\Autodesk\Autodesk Fusion 360\API\Python\defs` (`mklink /J .fusion_defs "<defs path>"`). Add it to `extraPaths` in `pyrightconfig.json`. Never edit files inside the junction.
 
 ## 2. Script bootstrap

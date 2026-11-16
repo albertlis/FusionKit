@@ -120,17 +120,7 @@ In Claude Code, add the marketplace and install the plugin:
 
 No Python install is needed for this path. The plugin contents are listed under [Plugin contents](#plugin-contents). For the optional `fusion-cad` MCP server, see [Recommended MCP stack](#recommended-mcp-stack).
 
-### 2. Set `FUSIONKIT_PATH`
-
-The skill finds FusionKit through the `FUSIONKIT_PATH` environment variable. If it is not set, the skill falls back to the plugin root. The plugin cache path changes between plugin versions, so we recommend setting the variable permanently. On Windows:
-
-```
-setx FUSIONKIT_PATH "C:\path\to\FusionKit"
-```
-
-Restart Fusion afterwards. A running process does not see new environment variables.
-
-### 3. Run the demo
+### 2. Run the demo
 
 In Claude Code, ask:
 
@@ -139,6 +129,11 @@ In Claude Code, ask:
 Create a new design document in Fusion first. The demo writes into the open document, so do not run it on a document you need to keep.
 
 If the report ends with `dfam=0F/0W` and the bracket appears in Fusion, the setup works. Step names for partial runs: [demo README](examples/demo_bracket/README.md#run).
+
+Nothing to configure: Claude fills in the plugin's install path when it loads the skill. Set `FUSIONKIT_PATH` only in these cases:
+
+- **Dev clone.** You want Claude to use your own FusionKit checkout instead of the plugin copy. Set `FUSIONKIT_PATH` to that checkout's root, for example with `setx FUSIONKIT_PATH "C:\path\to\FusionKit"`, then restart Fusion. A running process does not see new environment variables.
+- **Scripts run by hand.** A script you saved in Fusion's **Scripts and Add-Ins** dialog embeds the plugin path it was generated with. That path changes after a plugin update. Either point `FUSIONKIT_PATH` at a clone, or ask Claude to write the script again.
 
 ### Without the plugin
 
@@ -177,7 +172,7 @@ Entry files must define `def run(_context)`. The loader expects the layout `<pro
 
 - **MCP call fails with `ECONNREFUSED`.** The Fusion MCP server has stopped. Check that Fusion is open and that the API is enabled under **Preferences > General > API**. Then restart Fusion.
 - **An edited helper still runs its old code.** Fusion keeps modules between runs. Start every script through `loader.run_part`, which purges `fusion_kit.*` first. `loader.py` is cached too: after you change it, restart Fusion.
-- **`FUSIONKIT_PATH` is not seen.** A running process does not see new environment variables. Restart Fusion after `setx`.
+- **Your `FUSIONKIT_PATH` is not seen.** This applies only when you set it, for example to a dev clone. A running process does not see new environment variables. Restart Fusion after `setx`.
 - **`ModuleNotFoundError: fusion_kit` at the top of a script.** Move the import inside `run()`, after the `sys.path` insert.
 
 ## Example
