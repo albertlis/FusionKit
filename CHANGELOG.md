@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0](https://github.com/albertlis/FusionKit/compare/v0.1.0...v0.2.0) (2026-11-17)
+
+
+### Features
+
+* release automation, workflow guide, README rewrite with FDM focus ([cc59649](https://github.com/albertlis/FusionKit/commit/cc59649a1756c1b74fcaede5a1381abac82f99ff))
+
+
+### Bug Fixes
+
+* FUSIONKIT_PATH optional for plugin users ([9660983](https://github.com/albertlis/FusionKit/commit/96609832187762d18fa313bd5f77bec810241ac1))
+* plugin no longer registers MCP servers ([d6235d9](https://github.com/albertlis/FusionKit/commit/d6235d989a542eca3f885876c6c83748b999b382))
+
+
+### Documentation
+
+* restyle README ([b5898cf](https://github.com/albertlis/FusionKit/commit/b5898cfab84161134dc4f2dbc6cf2ce52115fb91))
+
 ## [0.1.0] - 2026-11-16
 
 ### Added
