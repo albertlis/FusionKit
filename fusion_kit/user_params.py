@@ -1,5 +1,6 @@
 """User Parameter utilities for Fusion 360 parametric scripts."""
 
+import re
 from types import SimpleNamespace
 
 import adsk.core
@@ -7,6 +8,8 @@ import adsk.fusion
 
 # Fusion stores every length param internally in cm, whatever the display unit: value * 10 -> mm.
 _LENGTH_UNITS = {"mm", "cm", "m", "in", "ft"}
+_ANGLE_UNITS = {"deg", "rad"}
+_IDENT = re.compile(r"(?<![\w.])[A-Za-z_]\w*")
 
 
 def _prune_stale(design: adsk.fusion.Design, keep: set[str]) -> None:
@@ -89,3 +92,31 @@ def snapshot_geo(design: adsk.fusion.Design) -> SimpleNamespace:
         p = up.item(i)
         setattr(g, p.name, p.value * 10 if p.unit in _LENGTH_UNITS else p.value)
     return g
+
+
+def eval_fresh(design: adsk.fusion.Design, expr: str, units: str) -> float:
+    """Expr -> Fusion internal units (cm for length, rad for angle), never from stale cache.
+
+    evaluateExpression and UserParameter.value read the CACHED value of a derived user param; after
+    ensure_params changes an upstream param in the same script it is not recomputed yet. So every
+    user-param name in expr is replaced by its own fresh value (recursive, from .expression) with an
+    explicit unit suffix; only the leftover literals reach Fusion. Non-user names (model params) stay as-is.
+    """
+    up = design.userParameters
+
+    def fresh(m: re.Match[str]) -> str:
+        name = m.group(0)
+        p = up.itemByName(name)
+        if p is None:
+            return name
+        if p.unit in _LENGTH_UNITS:
+            suffix = " cm"  # eval_fresh returns internal cm for every length unit
+        elif p.unit in _ANGLE_UNITS:
+            suffix = " rad"
+        elif p.unit == "":
+            suffix = ""
+        else:
+            raise RuntimeError(f"user parameter {name!r} unit {p.unit!r} unsupported in expression {expr!r}")
+        return f"({eval_fresh(design, p.expression, p.unit):.12f}{suffix})"
+
+    return design.unitsManager.evaluateExpression(_IDENT.sub(fresh, expr), units)

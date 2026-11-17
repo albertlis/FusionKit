@@ -20,6 +20,7 @@ import adsk.fusion
 from fusion_kit.enums import ALIGNED_DIM, HORIZONTAL_DIM, VERTICAL_DIM
 from fusion_kit.expr import Ex, as_str
 from fusion_kit.timeline import check_label, set_label
+from fusion_kit.user_params import eval_fresh
 
 P3 = adsk.core.Point3D.create
 
@@ -66,8 +67,11 @@ def circle(
     """Circle centred at MODEL point (x, y, z) mm, radius r mm. diameter -> parametric diameter dim.
 
     Centre stays free: position it with anchor().
+    The centre is projected onto the sketch plane (sketch z = 0): on an offset plane a model point off the plane
+    keeps a nonzero sketch z, the circle floats off-plane and its extrude starts there (cut misses the body).
     """
-    c = s.sketchCurves.sketchCircles.addByCenterRadius(to_sketch(s, x, y, z), r / 10)
+    c0 = to_sketch(s, x, y, z)
+    c = s.sketchCurves.sketchCircles.addByCenterRadius(P3(c0.x, c0.y, 0.0), r / 10)
     if diameter is not None:
         g = c.centerSketchPoint.geometry
         s.sketchDimensions.addDiameterDimension(c, P3(g.x + r / 10, g.y + r / 10, 0)).parameter.expression = as_str(
@@ -285,9 +289,9 @@ Pt = tuple[str, str, str]  # MODEL x, y, z as signed expressions
 
 
 def mm(expr: str) -> float:
-    """Expression -> mm."""
-    um = adsk.fusion.Design.cast(adsk.core.Application.get().activeProduct).unitsManager
-    return um.evaluateExpression(expr, "mm") * 10
+    """Expression -> mm. Derived user params are re-evaluated from .expression (no stale .value)."""
+    design = adsk.fusion.Design.cast(adsk.core.Application.get().activeProduct)
+    return eval_fresh(design, expr, "mm") * 10
 
 
 def _sketch_dims(s: adsk.fusion.Sketch, p: Pt) -> tuple[str | None, str | None]:
@@ -314,7 +318,13 @@ def _sketch_dims(s: adsk.fusion.Sketch, p: Pt) -> tuple[str | None, str | None]:
 
 
 def fix_point(s: adsk.fusion.Sketch, sp: adsk.fusion.SketchPoint, p: Pt) -> None:
-    """Dimension sp from the sketch origin to model point p (expressions)."""
+    """Dimension sp from the sketch origin to model point p (expressions).
+
+    Dims are unsigned: the side comes from sp's current position, so sp must already sit at p's
+    evaluated position (e.g. circle(s, *map(mm, p), ...), not circle(s, 0, 0, ...)).
+    Concentric circles: fix one centre, tie the others with addCoincident (a second fix_point on the same
+    location over-constrains, VCS_SKETCH_OVER_CONSTRAINTS).
+    """
     h, v = _sketch_dims(s, p)
     anchor(s, sp, h, v)
 

@@ -14,7 +14,16 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from fusion_kit._vec import _cross, _dot, _sub
-from fusion_kit.dfam import GrooveRect, in_groove_rect, warp_family_mm
+from fusion_kit.dfam import (
+    SLIT_MAX_MM,
+    GrooveRect,
+    in_groove_rect,
+    print_frame_body,
+    warp_family_mm,
+)
+from fusion_kit.dfam import (
+    annulus_width_mm as _annulus_width_mm,
+)
 
 if TYPE_CHECKING:
     import adsk.core
@@ -26,13 +35,25 @@ Tri = tuple[int, int, int]
 BedKind = Literal["area", "edge", "point", "none"]
 
 EPS_MM = 1e-6  # strict "above" margin for hanging-edge and floating-vertex tests
-DOWN_EPS = 1e-6  # unit normal n_z below -DOWN_EPS = triangle faces downward (underside)
+DOWN_EPS = 1e-2  # unit normal n_z below -DOWN_EPS = triangle faces downward (underside); 1e-2 (~0.6 deg) absorbs tessellation tilt of vertical walls (false hanging chains)
 UP_EPS = 1e-6  # unit normal n_z above +UP_EPS = triangle faces upward (top); |n_z| <= UP_EPS = vertical, neutral
 DEGEN_MM = 1e-12  # |cross product| below this = degenerate triangle / zero-length edge
 POINT_SPAN_MM = 0.5  # on-bed vertices spanning less than this = point contact
 TOP_N = 20
 BREP_SNAP_TOL_MM = 0.1  # B-rep projection farther than this from a facet point (centroid or vertex) = not the same surface (chordal tol)
 IDENTITY: Rot = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+SLIT_FOOT_TOL_MM = 0.05  # wall facet is a chord of a curved wall: foot point may sit this far outside its triangle
+WALL_NZ = 0.3  # |n_z| below this = wall-like face (within ~17 deg of vertical) for the slit test
+SHORT_BRIDGE_MAX_MM = 1.0  # flat down-facing B-rep face whose shortest in-plane span <= this = short bridge, PETG bridges it (user P25 2026-11-17)
+CANTILEVER_MAX_MM = 1.0  # flat down-facing 1-loop face whose reach from ONE supported edge's line <= this = short cantilever (user P26 2026-11-17)
+SHORT_BRIDGE_STEP_DEG = (
+    2.0  # in-plane direction step for min-width; discrete directions only overestimate width (safe side: no exemption)
+)
+BRIDGE_PLANE_TOL_MM = 0.05  # boundary samples this far off the face plane = not a planar face
+BRIDGE_SAMPLE_MM = 0.1  # edge sampling pitch for boundary points of a short-bridge candidate
+SUPPORT_DROP_MM = (
+    0.1  # short-bridge long side counts as supported only if a neighbour reaches this far below the bridge plane
+)
 
 
 @dataclass
@@ -198,6 +219,57 @@ def _is_identity(rot: Rot) -> bool:
     return all(abs(rot[i][j] - IDENTITY[i][j]) <= 1e-9 for i in range(3) for j in range(3))
 
 
+def _sub(a: Vec, b: Vec) -> Vec:
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def _cross(a: Vec, b: Vec) -> Vec:
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+def _dot(a: Vec, b: Vec) -> float:
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _foot_outside_mm(verts: list[Vec], t: Tri, f: Vec, n: Vec) -> float:
+    """Distance (mm) from f, on the plane of t (unit winding normal n), beyond the nearest edge of t; <= 0 inside."""
+    worst = -math.inf
+    for k in range(3):
+        p = verts[t[k]]
+        q = verts[t[(k + 1) % 3]]
+        e = _sub(q, p)
+        worst = max(worst, -_dot(_cross(e, _sub(f, p)), n) / math.sqrt(_dot(e, e)))
+    return worst
+
+
+def _slit_ceiling(verts: list[Vec], tris: list[Tri], geoms: list[tuple[Vec, float] | None], t: Tri) -> bool:
+    """Down-facing face t is the ceiling of a slot <= SLIT_MAX_MM wide. Test: centroid c sits in air between two
+    wall-like faces (|n_z| < WALL_NZ) that face each other: c on each wall's normal side, distance d1, d2 with
+    d1 + d2 <= SLIT_MAX_MM, footprint of c's foot point within SLIT_FOOT_TOL_MM of the wall triangle (curved walls
+    are tessellated chords). A solid bridge or a thin fin has no such pair (its walls face away from c), so only true
+    slits pass."""
+    c = _centroid(verts, t)
+    walls: list[tuple[float, Vec]] = []
+    for s, g in zip(tris, geoms):
+        if g is None:
+            continue
+        n = g[0]
+        if abs(n[2]) >= WALL_NZ:
+            continue
+        zs = [verts[i][2] for i in s]
+        if not (min(zs) - EPS_MM <= c[2] <= max(zs) + EPS_MM):
+            continue
+        d = _dot(_sub(c, verts[s[0]]), n)
+        if not (0.0 < d <= SLIT_MAX_MM):
+            continue
+        foot = (c[0] - d * n[0], c[1] - d * n[1], c[2] - d * n[2])
+        if _foot_outside_mm(verts, s, foot, n) <= SLIT_FOOT_TOL_MM:
+            walls.append((d, n))
+    return any(
+        d1 + d2 <= SLIT_MAX_MM and _dot(n1, n2) < 0.0 for i, (d1, n1) in enumerate(walls) for d2, n2 in walls[i + 1 :]
+    )
+
+
 def check(
     mesh: Mesh,
     min_angle_deg: float = 45.0,
@@ -215,7 +287,8 @@ def check(
     frame. A down-facing triangle with all 3 vertices inside one rect (z <= 0.5 mm) is not overhang. Rects are
     design frame: pass them only for the identity orientation (sweep / check_body do this).
 
-    Overhang: face fails if theta < min_angle_deg - angle_tol_deg. Hanging edge: slope < min_angle_deg
+    Overhang: face fails if theta < min_angle_deg - angle_tol_deg, except slot ceilings (_slit_ceiling: <= SLIT_MAX_MM
+    between facing walls, closed by slicer). Hanging edge: slope < min_angle_deg
     (same tolerance), adjacent normals differ by >= fold_min_deg (a coplanar diagonal inside a sloped
     face is not a fold), and its low end lies on a local-minimum plateau: the group of connected
     equal-Z vertices has every outside neighbour strictly higher, and sits above bed. And one of the
@@ -247,7 +320,11 @@ def check(
         if exempt_rects and _tri_in_groove(verts, t, exempt_rects):
             continue
         theta = math.degrees(math.acos(min(1.0, -n[2])))
-        if theta < min_angle_deg - angle_tol_deg and not (overhang_ok is not None and overhang_ok(t)):
+        if (
+            theta < min_angle_deg - angle_tol_deg
+            and not (overhang_ok is not None and overhang_ok(t))
+            and not _slit_ceiling(verts, tris, geoms, t)
+        ):
             overhangs.append((area, theta, _centroid(verts, t)))
     overhang_area = sum((o[0] for o in overhangs), 0.0)
     worst = min((o[1] for o in overhangs), default=math.inf)
@@ -763,6 +840,211 @@ def _brep_overhang_deg(body: adsk.fusion.BRepBody, points_mm: list[Vec]) -> floa
     return math.degrees(math.acos(min(1.0, -n.z / ln)))
 
 
+def _brep_slit_ceiling(body: adsk.fusion.BRepBody, points_mm: list[Vec]) -> bool:
+    """True if the B-rep face the facet centroid snaps to is a down-facing annulus <= SLIT_MAX_MM wide.
+
+    Same snap as _brep_overhang_deg (centroid picks face, all vertices must lie on it). Covers the flat slot ceiling
+    that chord-sagged mesh facets cannot prove. ValueError (no normal) propagates.
+    """
+    from fusion_kit.features import face_normal
+
+    hit = _snap_face(body, points_mm[0])
+    if hit is None:
+        return False
+    face, on = hit
+    if any(_project_on_face(face, p) is None for p in points_mm[1:]):
+        return False
+    if face_normal(face, on).z >= 0.0:
+        return False
+    width = _annulus_width_mm(face)
+    if width is not None and width <= SLIT_MAX_MM:
+        return True
+    return _brep_short_bridge(face) or _brep_short_cantilever(
+        face
+    )  # bridge <= SHORT_BRIDGE_MAX_MM (P25); cantilever (P26)
+
+
+def _min_span(points: list[Vec], normal: Vec) -> tuple[float, Vec]:
+    """(min width mm, unit in-plane direction of that width) of a point set lying in a plane with normal `normal`:
+    min over in-plane directions (every SHORT_BRIDGE_STEP_DEG, 0..180) of max-min of the projection. Pure. Discrete
+    directions only overestimate width."""
+    n_len = math.sqrt(_dot(normal, normal))
+    n = (normal[0] / n_len, normal[1] / n_len, normal[2] / n_len)
+    helper: Vec = (1.0, 0.0, 0.0) if abs(n[0]) < 0.9 else (0.0, 1.0, 0.0)
+    e1 = _cross(n, helper)
+    e1_len = math.sqrt(_dot(e1, e1))
+    e1 = (e1[0] / e1_len, e1[1] / e1_len, e1[2] / e1_len)
+    e2 = _cross(n, e1)
+    best = math.inf
+    best_d: Vec = e1
+    for k in range(int(180.0 / SHORT_BRIDGE_STEP_DEG)):
+        a = math.radians(k * SHORT_BRIDGE_STEP_DEG)
+        d: Vec = (
+            math.cos(a) * e1[0] + math.sin(a) * e2[0],
+            math.cos(a) * e1[1] + math.sin(a) * e2[1],
+            math.cos(a) * e1[2] + math.sin(a) * e2[2],
+        )
+        proj = [_dot(p, d) for p in points]
+        width = max(proj) - min(proj)
+        if width < best:
+            best, best_d = width, d
+    return best, best_d
+
+
+def _min_width_mm(points: list[Vec], normal: Vec) -> float:
+    """Min width (mm) of a point set in a plane with normal `normal` (see _min_span)."""
+    return _min_span(points, normal)[0]
+
+
+def _edge_points_mm(e: adsk.fusion.BRepEdge) -> list[Vec] | None:
+    """Samples (mm, body frame) of one edge every BRIDGE_SAMPLE_MM via edge.evaluator. None if the evaluator refuses
+    a parameter (ok=False). Fusion RuntimeError (e.g. "3 : invalid argument parameter" on some side_wall bed faces)
+    -> ValueError: check_body.overhang_ok catches ValueError, so the facet stays flagged instead of crashing."""
+    n = max(2, min(400, math.ceil(e.length * 10.0 / BRIDGE_SAMPLE_MM) + 1))
+    ok, s, t = e.evaluator.getParameterExtents()
+    if not ok:
+        return None
+    pts: list[Vec] = []
+    for k in range(n):
+        try:
+            ok, p = e.evaluator.getPointAtParameter(s + (t - s) * k / (n - 1))
+        except RuntimeError as exc:
+            raise ValueError(f"_edge_points_mm: evaluator raised {exc}") from exc
+        if not ok:
+            return None
+        pts.append((p.x * 10.0, p.y * 10.0, p.z * 10.0))
+    return pts
+
+
+def _edge_side(pts: list[Vec], d: Vec, lo: float, hi: float) -> int:
+    """-1 if every sample projects on d at the low end of the span (<= lo + tol), +1 if all at the high end, else 0."""
+    proj = [_dot(p, d) for p in pts]
+    if max(proj) <= lo + BRIDGE_PLANE_TOL_MM:
+        return -1
+    if min(proj) >= hi - BRIDGE_PLANE_TOL_MM:
+        return 1
+    return 0
+
+
+def _edge_supported(e: adsk.fusion.BRepEdge, face: adsk.fusion.BRepFace, z_mm: float) -> bool:
+    """True if a face other than `face` shares edge e and reaches SUPPORT_DROP_MM below the bridge plane z_mm: material
+    under the edge carries the bridge. Open edge or wall rising from the plane = not supported."""
+    return any(g.tempId != face.tempId and g.boundingBox.minPoint.z * 10.0 < z_mm - SUPPORT_DROP_MM for g in e.faces)
+
+
+def _brep_short_bridge(face: adsk.fusion.BRepFace) -> bool:
+    """True if B-rep face is a flat down-facing bridge whose shortest in-plane span <= SHORT_BRIDGE_MAX_MM.
+    Caller passes only faces whose angle is below min_angle (overhang candidates). Rules:
+      - 2 loops: concentric annulus, width = _annulus_width_mm (ring r 6.0/6.1 yes, 6/8 no; off-centre no).
+        Support: every edge of both loops is _edge_supported (material under the whole ring).
+      - 1 loop: boundary samples must lie on one plane (BRIDGE_PLANE_TOL_MM), width = _min_span.
+        Support: the two long sides (edges wholly at the min / max end of the span) each need >= 1 edge, all _edge_supported.
+        Free cantilever (open or up-going long sides) = not exempt.
+      - 0 or >2 loops, up-facing, non-planar boundary, unreadable evaluator = False (stays overhang).
+    ValueError from face_normal propagates (check_body catches it)."""
+    from fusion_kit.features import face_normal
+
+    loops = list(face.loops)
+    if not loops:
+        return False
+    if len(loops) == 2:
+        width = _annulus_width_mm(face)
+        if width is None or width > SHORT_BRIDGE_MAX_MM:
+            return False
+    elif len(loops) != 1:
+        return False
+    n = face_normal(face)
+    normal: Vec = (n.x, n.y, n.z)
+    if normal[2] >= 0.0:
+        return False
+    z_mm = face.pointOnFace.z * 10.0  # planar bridge: any point of the face lies in the bridge plane (cm -> mm)
+    if len(loops) == 2:
+        return all(_edge_supported(e, face, z_mm) for lp in loops for e in lp.edges)
+    edges = list(loops[0].edges)
+    per_edge: list[list[Vec]] = []
+    for e in edges:
+        ep = _edge_points_mm(e)
+        if ep is None:
+            return False
+        per_edge.append(ep)
+    pts = [p for ep in per_edge for p in ep]
+    if not pts:
+        return False
+    p0 = pts[0]
+    if any(abs(_dot(_sub(p, p0), normal)) > BRIDGE_PLANE_TOL_MM for p in pts):
+        return False
+    width, d = _min_span(pts, normal)
+    if width > SHORT_BRIDGE_MAX_MM:
+        return False
+    proj = [_dot(p, d) for p in pts]
+    lo, hi = min(proj), max(proj)
+    sides: dict[int, list[adsk.fusion.BRepEdge]] = {-1: [], 1: []}
+    for e, ep in zip(edges, per_edge):
+        side = _edge_side(ep, d, lo, hi)
+        if side != 0:
+            sides[side].append(e)
+    for s in (-1, 1):  # both long sides must rest on material
+        if not sides[s] or not all(_edge_supported(e, face, z_mm) for e in sides[s]):
+            return False
+    return True
+
+
+def _line_dist_mm(p: Vec, a: Vec, u: Vec) -> float:
+    """Distance (mm) of point p from the line a + t*u (u unit)."""
+    v = _sub(p, a)
+    t = _dot(v, u)
+    perp: Vec = (v[0] - t * u[0], v[1] - t * u[1], v[2] - t * u[2])
+    return math.sqrt(_dot(perp, perp))
+
+
+def _brep_short_cantilever(face: adsk.fusion.BRepFace) -> bool:
+    """True if B-rep face is a flat down-facing 1-loop cantilever with reach <= CANTILEVER_MAX_MM from ONE supported edge.
+    Reach = max distance of every boundary point from the line through that edge's sampled endpoints. Exempt if at
+    least one _edge_supported edge gives reach <= CANTILEVER_MAX_MM (+EPS_MM). Rules:
+      - no supported edge, 0 or >1 loops, up-facing, non-planar boundary = False (stays overhang).
+      - supported edge with degenerate chord (closed / point edge) gives no line = skipped.
+    ValueError from face_normal / edge evaluator propagates (check_body catches it)."""
+    from fusion_kit.features import face_normal
+
+    loops = list(face.loops)
+    if len(loops) != 1:
+        return False
+    n = face_normal(face)
+    normal: Vec = (n.x, n.y, n.z)
+    if normal[2] >= 0.0:
+        return False
+    z_mm = face.pointOnFace.z * 10.0  # planar bridge: any point of the face lies in the bridge plane (cm -> mm)
+    edges = list(loops[0].edges)
+    supported = [_edge_supported(e, face, z_mm) for e in edges]
+    if not any(supported):
+        return False
+    samples: list[list[Vec]] = []
+    for e in edges:
+        ep = _edge_points_mm(e)
+        if ep is None:
+            return False
+        samples.append(ep)
+    pts = [p for ep in samples for p in ep]
+    if not pts:
+        return False
+    p0 = pts[0]
+    if any(abs(_dot(_sub(p, p0), normal)) > BRIDGE_PLANE_TOL_MM for p in pts):
+        return False
+    for ep, sup in zip(samples, supported):
+        if not sup:
+            continue
+        a = ep[0]
+        chord = _sub(ep[-1], a)
+        clen = math.sqrt(_dot(chord, chord))
+        if clen < BRIDGE_SAMPLE_MM:
+            continue  # closed or point edge: no line to measure from
+        u: Vec = (chord[0] / clen, chord[1] / clen, chord[2] / clen)
+        reach = max(_line_dist_mm(p, a, u) for p in pts)
+        if reach <= CANTILEVER_MAX_MM + EPS_MM:
+            return True
+    return False
+
+
 def check_body(
     body: adsk.fusion.BRepBody,
     up_rot: Rot = IDENTITY,
@@ -774,21 +1056,26 @@ def check_body(
     angle_tol_deg: float = 0.05,
     fold_min_deg: float = 2.0,
 ) -> PrintReport:
-    """mesh_from_body -> rotate by up_rot -> check(). Groove rects (warp_family_mm) exempt only when up_rot is
-    identity (rects are body frame). Same bed-at-z=0 assumption as check()."""
-    mesh = mesh_from_body(body, quality)
+    """mesh_from_body -> rotate by up_rot -> check(). Frame = PRINT frame: bed face (dfam/bed, '-z' default) on min Z
+    via print_frame_body; up_rot is applied on top of it. Groove rects (warp_family_mm) exempt only when up_rot is
+    identity (rects are print-frame). Same bed-at-z=0 assumption as check()."""
+    pbody = print_frame_body(body)
+    mesh = mesh_from_body(pbody, quality)
     ident = _is_identity(up_rot)
-    rects = warp_family_mm(body) if ident else None
+    rects = warp_family_mm(pbody) if ident else None
 
     def overhang_ok(t: Tri) -> bool:
         # tessellated facet below min angle but true B-rep face at >= min angle: chordal error, not overhang.
+        # Flat slot ceiling <= SLIT_MAX_MM wide (B-rep annulus): mesh sag cannot prove it, B-rep does (_brep_slit_ceiling).
         # Centroid AND all 3 vertices must snap to one such face; ValueError (no normal) keeps the facet flagged.
         pts = [_centroid(mesh.verts, t)] + [mesh.verts[i] for i in t]
         try:
-            angle = _brep_overhang_deg(body, pts)
+            angle = _brep_overhang_deg(pbody, pts)
+            if angle is not None and angle >= min_angle_deg:
+                return True
+            return _brep_slit_ceiling(pbody, pts)
         except ValueError:
             return False
-        return angle is not None and angle >= min_angle_deg
 
     return check(
         rotate_mesh(mesh, up_rot),

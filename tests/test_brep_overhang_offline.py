@@ -14,6 +14,12 @@ from fusion_kit import features, printability
 from fusion_kit.printability import IDENTITY, Mesh
 
 
+@pytest.fixture(autouse=True)
+def _identity_print_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    # fake bodies carry no attributes; bed '-z' by definition -> print frame = body itself
+    monkeypatch.setattr(printability, "print_frame_body", lambda body: body)
+
+
 def _sloped_mesh(phi_deg: float) -> Mesh:
     """One down-facing triangle, underside tilted phi_deg from horizontal (plane z = 10 - k x, k = tan phi)."""
     k = math.tan(math.radians(phi_deg))
@@ -52,6 +58,7 @@ def _brep_face(
             minPoint=SimpleNamespace(x=0.0, y=0.0, z=0.0), maxPoint=SimpleNamespace(x=1.0, y=1.0, z=1.0)
         ),
         evaluator=evaluator,
+        loops=[],  # planar sloped face: not a slit annulus (_annulus_width_mm)
     )
 
 

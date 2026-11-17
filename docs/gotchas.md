@@ -16,6 +16,7 @@ Pitfalls for Autodesk Fusion API scripts (run through the Fusion MCP `execute` t
 - **Sketch on `yZConstructionPlane` has swapped axes.** Measured mapping: sketch x = model −Z, sketch y = model +Y. Fix: map coordinates with `sketch.to_sketch(s, x_mm, y_mm, z_mm)`, and verify positions with `body.pointContainment`. A print that echoes the input values proves nothing.
 - **Sketch on a BRepFace (`new_sketch(comp, face)`) gets a projected holed outline.** Cause: Fusion auto-projects the face outline, so the profiles are the holed outline plus the inner circle. Symptom: `profile(sk)` with `outer=True` picks the holed outline, and the cut removes the body (measured: side walls removed). Fix: use `features.profile(sk, outer=False)` for the inner feature, and `sketch.to_sketch` for model-to-sketch points.
 - **Over-constrained sketch (`VCS_SKETCH_OVER_CONSTRAINTS`).** Cause: dimensions on exactly shared coordinates, or horizontal/vertical inference on coincident points. Fix: add per-vertex jitter with `sketch.param_poly`, and delete the inferred constraints.
+- **`param_poly` / `fix_point`: vertex sharing an exact coordinate.** Symptom: `VCS_SKETCH_OVER_CONSTRAINTS` when a vertex shares an exact x or y coordinate with the previous vertex. Cause: unknown. Fix: avoid shared coordinates; offset the vertex (a 0.3 mm overshoot was used, code since removed).
 - **Center-point slot geometry.** Cause: `addCenterPointSlot` takes the arc centre at the play position, and the overall length is 2 × play + width. Fix: size the slot from that rule; `holes.slot_sketch` wraps the call.
 
 ## Features
@@ -44,6 +45,7 @@ Pitfalls for Autodesk Fusion API scripts (run through the Fusion MCP `execute` t
 - **PointContainment enum names.** Cause: the enum members are `PointInsidePointContainment`, `On` and `Outside`; `...SolidPointContainment` does not exist. Fix: use the typed `POINT_*` constants from fusion_kit `enums`.
 - **Overhang threshold.** Cause: a downward-facing face with n_z > 0.707 counts as overhang (45° limit). An exact 45° chamfer evaluates to 0.7071 and trips the check. Fix: give the chamfer face 46° from horizontal (n_z 0.695; `features.bed_chamfer` default). 44° from horizontal gives n_z 0.719 and FAILS. Check in the print orientation, and flip the part if it is printed inverted.
 - **Silent loss of bodies or features.** Fix: run `report.report(comp)` on each component. It prints bodies, lumps, bounding box and timeline health.
+- **Fusion attributes are not carried through mirror or join.** Symptom: an attribute on a seed body (e.g. the dfam `grip_fin` face tag) is gone after `MirrorFeature` or `combine` join, so the DfAM exemption no longer matches (reported: 8 false `vertical_corner` FAILs). Fix: tag after the final join, or run the tagging builder (`grip_fit`) on the final joined body.
 
 ## Assemblies & joints
 
@@ -56,7 +58,9 @@ Pitfalls for Autodesk Fusion API scripts (run through the Fusion MCP `execute` t
 - **Fusion keeps `sys.modules` across script runs (module cache).** Symptom: stale code runs (measured: an old `select_edges` ran after a change). Fix: always launch via `fusion_kit.loader.run_part(entry)`, which purges `fusion_kit.*`, `parts.*` and the part package. Never `import fusion_kit` directly in execute code.
 - Switching FusionKit path: Fusion caches fusion_kit modules in sys.modules across runs; purge fusion_kit* before import (bootstrap snippet) or restart Fusion.
 - **Import bootstrap.** Symptom: top-level import fails with `ModuleNotFoundError: fusion_kit`. Fix: inside `run()`, call `sys.path.insert(0, os.environ["FUSIONKIT_PATH"])`, then `from fusion_kit.loader import run_part`, after purging fusion_kit* from sys.modules (see 'Switching FusionKit path').
+- **Monkeypatch after the loader purge.** Cause: `loader.run_part` purges `fusion_kit*` from `sys.modules`, so a patch applied before the purge is lost. Fix: apply the patch after the purge, replicating `run_part` by hand.
 - **Execute script must define `def run(_context)`.** Symptom: top-level code without `run` fails with `NameError: run`. Behaviour: any exception inside `run()` (including that NameError) makes MCP roll back ALL changes of that call.
+- **Probe by raising.** Cause: an exception at the end of an execute script rolls back everything the script did. Fix: build, measure, then `raise RuntimeError(log)`; the log comes back in the error text.
 - **Execute call timeouts.** Measured: a single call of 533 s completed. The harness MCP timeout is 900 s. Fix: split long builds and checks into separate `run(context)` calls. A timed-out call keeps Fusion busy, so later calls also time out. Do not retry; wait until Fusion is idle.
 - **Read-only diagnostic scripts.** Fix: pass `readOnly: true` to execute. Such scripts run even while a command dialog is open.
 - **"command dialog is open" blocks execute.** Cause: a Fusion command is open in the UI. Fix: close it (Esc) in Fusion.

@@ -18,7 +18,7 @@ import adsk.core
 import adsk.fusion
 
 from fusion_kit._vec import _cross, _unit_strict
-from fusion_kit.dfam import BED_CHAMFER_ANGLE_DEG
+from fusion_kit.dfam import BED_CHAMFER_ANGLE_DEG, BedDir, bed_axis, bed_wall_ratio, set_bed
 from fusion_kit.enums import (
     IDENTICAL_PATTERN,
     OP_CUT,
@@ -594,6 +594,20 @@ def axis_x_through(
     return _axis_by_planes(comp, ("y", "z"), (y, z), label)
 
 
+def axis_z_through(
+    comp: adsk.fusion.Component,
+    *,
+    x: str | Ex,
+    y: str | Ex,
+    label: str,
+) -> adsk.fusion.ConstructionAxis:
+    """Live construction axis parallel to Z through (x, y): plane x=const ∩ plane y=const.
+
+    x, y: mm expressions (str or Ex). Same rebuild rules as axis_y_through.
+    """
+    return _axis_by_planes(comp, ("x", "y"), (x, y), label)
+
+
 def _rotate_about_root_axis(
     comp: adsk.fusion.Component,
     bodies: adsk.fusion.BRepBody | list[adsk.fusion.BRepBody],
@@ -1003,32 +1017,68 @@ _BED_FLAT_TOL_CM = 1e-4  # bed face flat at min Z: bbox z spread, cm (1 um); one
 _BED_MAX_NZ = 0.707  # DfAM bed_chamfer overhang limit (docs/dfam_guidelines.md): chamfer face |n_z| must be below this
 
 
-def _bed_outer_edges(body: adsk.fusion.BRepBody, only_largest_bed_face: bool) -> list[adsk.fusion.BRepEdge]:
-    """Outer-loop edges of the min-Z bed face(s); see bed_chamfer for only_largest_bed_face."""
-    zb = body.boundingBox.minPoint.z
+def _bed_loop_edges(
+    body: adsk.fusion.BRepBody, only_largest_bed_face: bool, bed: BedDir, outer: bool
+) -> list[adsk.fusion.BRepEdge]:
+    """Outer (outer=True) or inner (False) loop edges of the bed face(s): planar faces with outward normal = bed direction, at the body bbox extreme."""
+    a, s = bed_axis(bed)
+    bb = body.boundingBox
+    zb = _xyz(bb.minPoint if s < 0 else bb.maxPoint)[a]
+    normal = (float(s) * (a == 0), float(s) * (a == 1), float(s) * (a == 2))
     edges: list[adsk.fusion.BRepEdge] = []
     if only_largest_bed_face:
         beds = [
             f
-            for f in faces_by_normal(body, (0.0, 0.0, -1.0), min_dot=0.999)
+            for f in faces_by_normal(body, normal, min_dot=0.999)
             if isinstance(f.geometry, adsk.core.Plane)
-            and abs(f.boundingBox.minPoint.z - zb) < _BED_FLAT_TOL_CM
-            and abs(f.boundingBox.maxPoint.z - zb) < _BED_FLAT_TOL_CM
+            and abs(_xyz(f.boundingBox.minPoint)[a] - zb) < _BED_FLAT_TOL_CM
+            and abs(_xyz(f.boundingBox.maxPoint)[a] - zb) < _BED_FLAT_TOL_CM
         ]
         if beds:
-            bed = max(beds, key=lambda f: f.area)
-            edges = [e for lp in bed.loops if lp.isOuter for e in lp.edges]
+            bed_face = max(beds, key=lambda f: f.area)
+            edges = [e for lp in bed_face.loops if lp.isOuter == outer for e in lp.edges]
     else:
         for f in body.faces:
             if not isinstance(f.geometry, adsk.core.Plane):
                 continue
             fb = f.boundingBox
-            if abs(fb.minPoint.z - zb) > _BED_FLAT_TOL_CM or abs(fb.maxPoint.z - zb) > _BED_FLAT_TOL_CM:
+            if abs(_xyz(fb.minPoint)[a] - zb) > _BED_FLAT_TOL_CM or abs(_xyz(fb.maxPoint)[a] - zb) > _BED_FLAT_TOL_CM:
                 continue
             for lp in f.loops:
-                if lp.isOuter:
+                if lp.isOuter == outer:
                     edges.extend(lp.edges)
     return edges
+
+
+def _bed_outer_edges(
+    body: adsk.fusion.BRepBody, only_largest_bed_face: bool, bed: BedDir = "-z"
+) -> list[adsk.fusion.BRepEdge]:
+    """Outer-loop edges of the bed face(s)."""
+    return _bed_loop_edges(body, only_largest_bed_face, bed, True)
+
+
+def _bed_inner_edges(
+    body: adsk.fusion.BRepBody, only_largest_bed_face: bool, bed: BedDir = "-z"
+) -> list[adsk.fusion.BRepEdge]:
+    """Inner-loop edges (holes, windows) of the bed face(s)."""
+    return _bed_loop_edges(body, only_largest_bed_face, bed, False)
+
+
+def _bed_dihedral_deg(edge: adsk.fusion.BRepEdge, bed: BedDir) -> float:
+    """Interior dihedral (deg) of the solid along a bed edge = 180 - angle(outward bed normal, outward side normal).
+    Convex edges only (bed outline convex, see bed_chamfer). Square corner -> 90; 15 deg dovetail wall -> 105."""
+    a, s = bed_axis(bed)
+    bed_n = (float(s) * (a == 0), float(s) * (a == 1), float(s) * (a == 2))
+    sides: list[tuple[float, float, float]] = []
+    for f in edge.faces:
+        n = f.evaluator.getNormalAtPoint(f.pointOnFace)[1]
+        v = (n.x, n.y, n.z)
+        if sum(p * q for p, q in zip(v, bed_n)) < 0.999:
+            sides.append(v)
+    if len(sides) != 1:
+        raise RuntimeError(f"bed_chamfer: bed edge has {len(sides)} non-bed faces, expected 1")
+    dot = sum(p * q for p, q in zip(sides[0], bed_n))
+    return 180.0 - math.degrees(math.acos(max(-1.0, min(1.0, dot))))
 
 
 def bed_chamfer(
@@ -1039,16 +1089,28 @@ def bed_chamfer(
     label: str,
     only_largest_bed_face: bool = False,
     angle_deg: float = BED_CHAMFER_ANGLE_DEG,
+    bed: BedDir = "-z",
+    min_edge_mm: float = 0.0,
+    inner_loops: bool = False,
 ) -> adsk.fusion.ChamferFeature:
-    """Elephant-foot chamfer on outer loops at min Z (print bed). Inner loops (holes) stay sharp.
+    """Elephant-foot chamfer on outer loops of the print bed face. Inner loops (holes) stay sharp unless inner_loops.
 
-    distance = WALL leg (vertical, along the wall, mm expr or Ex). Bed leg = distance / tan(angle_deg).
+    min_edge_mm: skip bed edges shorter than this (mm). A ~2 mm ledge between two chamfered edges cannot take a
+    1 mm chamfer chain -> ASM_BL_UNFIN_SHEET (side_wall dovetail ledge 1.92 mm, measured); 0 = all edges.
+    inner_loops: also chamfer the inner loops (holes, windows) of the bed face(s), same two-distance rule and dihedral
+    groups (a hole wall normal to the bed is phi 90), same min_edge_mm. False (default) keeps holes sharp = fits.
+
+    bed = bed face direction ('-z' default = min-Z face; '+x' = X-max face). Stored on body as dfam/bed (set_bed)
+    so report() checks the same bed. Chamfer face |n| is read on the bed axis.
+    distance = 90-deg-equivalent WALL leg (mm expr or Ex): bed footprint = distance / tan(angle_deg) for every phi; wall leg = distance * bed_wall_ratio(90, angle_deg) / bed_wall_ratio(phi, angle_deg). phi = the
+    edge's interior dihedral (90 square corner, 105 for a 15 deg dovetail wall). Edges are grouped by phi: one two-distance
+    edge set per group, all in ONE feature.
     angle_deg = chamfer FACE angle FROM HORIZONTAL, must be in (45, 90) exclusive, else ValueError.
-    46 (default) -> |n_z| = cos 46 = 0.695 < 0.707 (DfAM). 45 gives 0.7071 and FAILS, so it is rejected (no equal legs).
-    Two-distance chamfer (addTwoDistancesChamferEdgeSet). The Fusion API does not document which distance lands on
-    the bed face (isFlipped only "swaps" them), so isFlipped=False is tried first, then isFlipped=True. An orientation
-    is accepted only if the new chamfer faces' angle acos(|n_z|) equals angle_deg within 0.5 deg AND |n_z| < 0.707.
-    Mapping per edge is not known offline; measurement decides. Raises RuntimeError if neither orientation matches.
+    46 (default) -> |n_bed| = cos 46 = 0.695 < 0.707 (DfAM). 45 gives 0.7071 and FAILS, so it is rejected (no equal legs).
+    Two-distance sets (addTwoDistancesChamferEdgeSet). The Fusion API does not document which distance lands on the bed
+    face, so isFlipped=False is tried first, then isFlipped=True. An orientation is accepted only if every new chamfer
+    face's angle acos(|n_bed|) equals angle_deg within 0.5 deg AND |n_bed| < 0.707. Raises RuntimeError otherwise.
+    Live (side_wall, bed +x): with one ratio for all edges, the 105 deg faces came out 38.27 deg -> always rejected.
 
     only_largest_bed_face=False: outer loops of EVERY flat face at min Z.
     only_largest_bed_face=True: outer loop of the LARGEST planar face at min Z with normal -Z only. Use when thin
@@ -1058,25 +1120,37 @@ def bed_chamfer(
     """
     if not 45.0 < angle_deg < 90.0:
         raise ValueError(f"bed_chamfer {label!r}: angle_deg must be in (45, 90) exclusive, got {angle_deg}")
+    axis, _sign = bed_axis(bed)
     angle_tol_deg = 0.5  # measured chamfer face angle must equal angle_deg within this (deg)
     side = as_str(distance)
-    bed = f"({side}) / tan({angle_deg} deg)"
     check_label(label)
     for flip in (False, True):
-        edges = _bed_outer_edges(body, only_largest_bed_face)
+        edges = _bed_outer_edges(body, only_largest_bed_face, bed)
+        if inner_loops:
+            edges += _bed_inner_edges(body, only_largest_bed_face, bed)
+        if min_edge_mm > 0:
+            edges = [e for e in edges if e.length * 10.0 >= min_edge_mm]
         if not edges:
-            raise ValueError("bed_chamfer: no outer loop edges on the min-Z (bed) face")
+            raise ValueError(f"bed_chamfer: no outer loop edges on the {bed} (bed) face")
+        groups: dict[float, list[adsk.fusion.BRepEdge]] = {}
+        for e in edges:
+            groups.setdefault(round(_bed_dihedral_deg(e, bed), 1), []).append(e)
         ci = comp.features.chamferFeatures.createInput2()
-        ci.chamferEdgeSets.addTwoDistancesChamferEdgeSet(collection(edges), _vi(bed), _vi(side), flip, False)
+        ratio90 = bed_wall_ratio(90.0, angle_deg)
+        for phi, grp in sorted(groups.items()):
+            bed_leg = f"({side}) * {ratio90!r}"  # bed footprint = 90-deg footprint of distance, any phi
+            wall_leg = f"({side}) * {ratio90 / bed_wall_ratio(phi, angle_deg)!r}"
+            ci.chamferEdgeSets.addTwoDistancesChamferEdgeSet(collection(grp), _vi(bed_leg), _vi(wall_leg), flip, False)
         feat = comp.features.chamferFeatures.add(ci)
-        nz = [abs(f.evaluator.getNormalAtPoint(f.pointOnFace)[1].z) for f in feat.faces]
+        nz = [abs(_xyz(f.evaluator.getNormalAtPoint(f.pointOnFace)[1])[axis]) for f in feat.faces]
         angles = [math.degrees(math.acos(min(1.0, v))) for v in nz]
         if nz and max(nz) < _BED_MAX_NZ and all(abs(a - angle_deg) <= angle_tol_deg for a in angles):
             set_label(feat, label)
+            set_bed(body, bed)
             return feat
         feat.deleteMe()
     raise RuntimeError(
-        f"bed_chamfer {label!r}: no orientation gives chamfer face angle {angle_deg} deg with |n_z| < {_BED_MAX_NZ}"
+        f"bed_chamfer {label!r}: no orientation gives chamfer face angle {angle_deg} deg with |n_bed| < {_BED_MAX_NZ}"
     )
 
 
@@ -1184,52 +1258,84 @@ def groove_positions(length_mm: float, pitch_mm: float = 30.0) -> list[float]:
     return [(i - (n - 1) / 2) * pitch_mm for i in range(n)]
 
 
-def _seed_rect(s: adsk.fusion.Sketch, x0: float, y0: float, x1: float, y1: float) -> None:
-    """Seed groove rectangle (mm): BOTH corners dimensioned from the sketch origin.
+def _seed_rect(
+    s: adsk.fusion.Sketch,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    *,
+    bed_dir: BedDir = "-z",
+    bed_mm: float = 0.0,
+) -> None:
+    """Seed groove rectangle on the bed plane (mm). (x0, x1) / (y0, y1): MODEL coords along the bed's two in-plane
+    axes, lower axis index first ('-z' -> x, y; '+x' -> y, z). bed_mm = bed plane coordinate on its normal axis.
 
-    rect_xy() dims corner-to-corner with unsigned distances; the far edge is then placed by the solver's sign
-    pick (live X seed flipped to x0-width: X grooves centred 14.2 instead of 15). With an absolute dim on
-    each corner nothing is left to the sign pick. rect() corners stay jittered; the solver snaps them.
+    Corners are MODEL points: rect() and fix_point() take model coords and convert through the sketch (live probe:
+    yZ sketch x = -Z, xZ sketch y = -Z, xY as model). Both corners dimensioned from the sketch origin with
+    unsigned dims: rect_xy() dims corner-to-corner and the solver's sign pick flipped the far edge (live X seed,
+    centre 14.2 instead of 15). rect() corners stay jittered; the solver snaps them.
     """
-    bottom, _, top, _ = rect(s, (x0, y0, 0.0), (x1, y1, 0.0))
-    fix_point(s, bottom.startSketchPoint, (_mm(x0), _mm(y0), "0 mm"))
-    fix_point(s, top.startSketchPoint, (_mm(x1), _mm(y1), "0 mm"))
+    a, _ = bed_axis(bed_dir)
+    pa, pb = [k for k in range(3) if k != a]
+    c0: list[float] = [0.0, 0.0, 0.0]
+    c1: list[float] = [0.0, 0.0, 0.0]
+    c0[a] = c1[a] = bed_mm
+    c0[pa], c0[pb] = x0, y0
+    c1[pa], c1[pb] = x1, y1
+    bottom, _, top, _ = rect(s, (c0[0], c0[1], c0[2]), (c1[0], c1[1], c1[2]))
+    fix_point(s, bottom.startSketchPoint, (_mm(c0[0]), _mm(c0[1]), _mm(c0[2])))
+    fix_point(s, top.startSketchPoint, (_mm(c1[0]), _mm(c1[1]), _mm(c1[2])))
+
+
+# Model axes by letter, typed for axis_plane / axis_*_through.
+_AXES: tuple[Literal["x", "y", "z"], ...] = ("x", "y", "z")
 
 
 def _relief_family(
     comp: adsk.fusion.Component,
     bed: adsk.fusion.ConstructionPlane,
     body: adsk.fusion.BRepBody,
-    along: Literal["x", "y"],
+    along: Literal["x", "y", "z"],
     *,
     label: str,
     width_mm: float,
     depth_mm: float,
     pitch_mm: float,
+    bed_dir: BedDir = "-z",
+    depth_sign: int = 1,
+    bed_mm: float = 0.0,
 ) -> list[adsk.fusion.Feature]:
-    """Grooves spaced along `along`, each through the full span of the other axis: seed cut + rectangular pattern."""
+    """Grooves spaced along `along` (an in-plane axis of bed_dir), each through the full span of the other in-plane
+    axis: seed cut + rectangular pattern. Seed rect in model coords (_seed_rect).
+    depth_sign: +1 if the extrude of depth_mm goes into the body, -1 if the plane normal points out of it.
+    bed_mm: bed plane coordinate (mm) on the bed normal axis."""
+    a, _ = bed_axis(bed_dir)
+    i = "xyz".index(along)  # spacing axis
+    if i == a:
+        raise ValueError(f"warp groove family {along!r} is normal to bed {bed_dir!r}")
+    j = 3 - a - i  # groove run axis: the other in-plane axis
     bb = body.boundingBox
-    lo = (bb.minPoint.x * 10, bb.minPoint.y * 10)  # cm -> mm
-    hi = (bb.maxPoint.x * 10, bb.maxPoint.y * 10)
-    i = 0 if along == "x" else 1  # spacing axis
-    j = 1 - i  # groove run axis
-    centres = groove_positions(hi[i] - lo[i], pitch_mm)
+    lo_i, hi_i = getattr(bb.minPoint, _AXES[i]) * 10, getattr(bb.maxPoint, _AXES[i]) * 10  # cm -> mm
+    lo_j, hi_j = getattr(bb.minPoint, _AXES[j]) * 10, getattr(bb.maxPoint, _AXES[j]) * 10
+    centres = groove_positions(hi_i - lo_i, pitch_mm)
     if not centres:
         return []
-    first = (lo[i] + hi[i]) / 2 + centres[0]  # seed = first centre; pattern adds +pitch per instance
+    first = (lo_i + hi_i) / 2 + centres[0]  # seed = first centre; pattern adds +pitch per instance
     u0, u1 = first - width_mm / 2, first + width_mm / 2
-    v0, v1 = lo[j] - _GROOVE_OVERRUN_MM, hi[j] + _GROOVE_OVERRUN_MM
-    if along == "x":
-        x0, x1, y0, y1 = u0, u1, v0, v1
-    else:
-        x0, x1, y0, y1 = v0, v1, u0, u1
+    v0, v1 = lo_j - _GROOVE_OVERRUN_MM, hi_j + _GROOVE_OVERRUN_MM
+    iv = {i: (u0, u1), j: (v0, v1)}  # model intervals per in-plane axis
+    pa, pb = [k for k in range(3) if k != a]  # lower in-plane axis first, as _seed_rect expects
+    (x0, x1), (y0, y1) = iv[pa], iv[pb]
     s = new_sketch(comp, bed, label=f"{label}_{along}_sketch")
-    _seed_rect(s, x0, y0, x1, y1)
-    seed = extrude(comp, profile(s), _mm(depth_mm), op="cut", bodies=[body], label=f"{label}_{along}_seed")
+    _seed_rect(s, x0, y0, x1, y1, bed_dir=bed_dir, bed_mm=bed_mm)
+    seed = extrude(comp, profile(s), _mm(depth_sign * depth_mm), op="cut", bodies=[body], label=f"{label}_{along}_seed")
     if along == "x":
         axis = axis_x_through(comp, y="0 mm", z="0 mm", label=f"{label}_x_axis")
-    else:
+    elif along == "y":
         axis = axis_y_through(comp, x="0 mm", z="0 mm", label=f"{label}_y_axis")
+    else:
+        axis = axis_z_through(comp, x="0 mm", y="0 mm", label=f"{label}_z_axis")
     # Pattern steps +pitch along the built axis. Fusion picks its direction (measured -Y on axis_y_through):
     # negative along the spacing axis -> negate pitch, else copies land outside the body. Seed stays at lowest centre.
     step = -pitch_mm if _xyz(axis.geometry.direction)[i] < 0 else pitch_mm
@@ -1251,16 +1357,48 @@ def warp_relief_grooves(
     width_mm: float = 0.8,
     depth_mm: float = 0.3,
     pitch_mm: float = 30.0,
+    bed: BedDir = "-z",
 ) -> list[adsk.fusion.Feature]:
-    """Anti-warp relief grooves cut up into body from its bed (min Z of bbox): X family + Y family, full span.
+    """Anti-warp relief grooves cut into body from its print bed face (bed = BedDir; '-z' default = min Z of bbox).
 
-    Per direction: one seed groove (width_mm wide, depth_mm deep) + pattern_rectangular over groove_positions
-    of that direction's span, spacing pitch_mm. Labels: <label>_bed, <label>_{x,y}_{sketch,seed,pattern}, <label>_{x,y}_axis.
+    Two families = the two axes in the bed plane, full span. Per family: one seed groove (width_mm wide, depth_mm deep)
+    + pattern_rectangular over groove_positions of that family's span, spacing pitch_mm. Stores bed on body (set_bed).
+    Labels: <label>_bed, <label>_{a,b}_{sketch,seed,pattern}, <label>_{a,b}_axis (a, b = the in-plane axes).
     """
     check_label(label)
-    bed_mm = body.boundingBox.minPoint.z * 10  # cm -> mm
-    bed = axis_plane(comp, "z", _mm(bed_mm), bed_mm, label=f"{label}_bed")
+    a, sgn = bed_axis(bed)
+    corner = body.boundingBox.minPoint if sgn < 0 else body.boundingBox.maxPoint
+    bed_mm = getattr(corner, _AXES[a]) * 10  # cm -> mm
+    plane = axis_plane(comp, _AXES[a], _mm(bed_mm), bed_mm, label=f"{label}_bed")
+    # cut runs from the bed INTO the body = -sign * e_a; the plane normal sign comes from the base plane
+    depth_sign = 1 if getattr(plane.geometry.normal, _AXES[a]) * -sgn > 0 else -1
+    set_bed(body, bed)
+    fams: list[Literal["x", "y", "z"]] = [ax for k, ax in enumerate(_AXES) if k != a]
     return [
-        *_relief_family(comp, bed, body, "x", label=label, width_mm=width_mm, depth_mm=depth_mm, pitch_mm=pitch_mm),
-        *_relief_family(comp, bed, body, "y", label=label, width_mm=width_mm, depth_mm=depth_mm, pitch_mm=pitch_mm),
+        *_relief_family(
+            comp,
+            plane,
+            body,
+            fams[0],
+            label=label,
+            width_mm=width_mm,
+            depth_mm=depth_mm,
+            pitch_mm=pitch_mm,
+            bed_dir=bed,
+            depth_sign=depth_sign,
+            bed_mm=bed_mm,
+        ),
+        *_relief_family(
+            comp,
+            plane,
+            body,
+            fams[1],
+            label=label,
+            width_mm=width_mm,
+            depth_mm=depth_mm,
+            pitch_mm=pitch_mm,
+            bed_dir=bed,
+            depth_sign=depth_sign,
+            bed_mm=bed_mm,
+        ),
     ]

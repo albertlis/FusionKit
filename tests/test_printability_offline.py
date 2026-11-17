@@ -6,11 +6,16 @@ Meshes are hand-built in mm with print-up = +Z and outward winding.
 
 import math
 import random
+import sys
 import time
 from collections.abc import Callable
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
+from fusion_kit import features as _features
+from fusion_kit import printability as pb
 from fusion_kit.printability import (
     IDENTITY,
     Mesh,
@@ -169,6 +174,350 @@ def test_bed_faces_are_not_counted_as_overhang() -> None:
     rep = check(_cube(10.0))
     assert rep.overhang_area_mm2 == 0.0
     assert rep.overhangs == []
+
+
+def _slit_block(gap_lo: float, gap_hi: float, ceiling_z: float, size: float = 10.0) -> Mesh:
+    """size^3 block with slot x in (gap_lo, gap_hi), open at y=0 / y=size and at the bed (z=0), slot top at ceiling_z.
+    The slot top is a down-facing face between two facing walls: same local geometry as a closed anchor slit."""
+    a, b, h, s = gap_lo, gap_hi, ceiling_z, size
+    verts: list[Vec] = []
+    tris: list[Tri] = []
+
+    def quad(pts: list[Vec], out: Vec) -> None:
+        if _dot(_cross(_sub(pts[1], pts[0]), _sub(pts[2], pts[0])), out) < 0.0:
+            pts = pts[::-1]
+        base = len(verts)
+        verts.extend(pts)
+        tris.append((base, base + 1, base + 2))
+        tris.append((base, base + 2, base + 3))
+
+    quad([(0.0, 0.0, 0.0), (a, 0.0, 0.0), (a, s, 0.0), (0.0, s, 0.0)], (0.0, 0.0, -1.0))  # bed, left of slot
+    quad([(b, 0.0, 0.0), (s, 0.0, 0.0), (s, s, 0.0), (b, s, 0.0)], (0.0, 0.0, -1.0))  # bed, right of slot
+    quad([(0.0, 0.0, s), (s, 0.0, s), (s, s, s), (0.0, s, s)], (0.0, 0.0, 1.0))  # top
+    quad([(0.0, 0.0, 0.0), (0.0, s, 0.0), (0.0, s, s), (0.0, 0.0, s)], (-1.0, 0.0, 0.0))  # x=0 side
+    quad([(s, 0.0, 0.0), (s, s, 0.0), (s, s, s), (s, 0.0, s)], (1.0, 0.0, 0.0))  # x=size side
+    for y, sign in ((0.0, -1.0), (s, 1.0)):  # front / back faces, slot notch cut out
+        out: Vec = (0.0, sign, 0.0)
+        quad([(0.0, y, 0.0), (a, y, 0.0), (a, y, s), (0.0, y, s)], out)
+        quad([(b, y, 0.0), (s, y, 0.0), (s, y, s), (b, y, s)], out)
+        quad([(a, y, h), (b, y, h), (b, y, s), (a, y, s)], out)
+    quad([(a, 0.0, 0.0), (a, s, 0.0), (a, s, h), (a, 0.0, h)], (1.0, 0.0, 0.0))  # slot wall, solid at x<a
+    quad([(b, 0.0, 0.0), (b, 0.0, h), (b, s, h), (b, s, 0.0)], (-1.0, 0.0, 0.0))  # slot wall, solid at x>b
+    quad([(a, 0.0, h), (b, 0.0, h), (b, s, h), (a, s, h)], (0.0, 0.0, -1.0))  # slot ceiling (down-facing)
+    return weld(Mesh(verts=verts, tris=tris), 1e-6)
+
+
+def test_slit_ceiling_narrower_than_slit_max_is_not_overhang() -> None:
+    # 0.1 mm slot (anchor slit, slicer closes it): 0.1 x 10 mm ceiling must not count as overhang.
+    rep = check(_slit_block(4.95, 5.05, 7.0))
+    assert rep.overhang_area_mm2 == pytest.approx(0.0, abs=1e-9)
+
+
+@pytest.mark.parametrize("width", [0.3, 0.8])
+def test_bridge_wider_than_slit_max_stays_overhang(width: float) -> None:
+    rep = check(_slit_block(5.0 - width / 2, 5.0 + width / 2, 7.0))
+    assert rep.overhang_area_mm2 == pytest.approx(10.0 * width, rel=1e-6)
+
+
+def _ring_slit(ai_deg: list[float], ao_deg: list[float], r_in: float, r_out: float, h: float = 7.0) -> Mesh:
+    """Peg-anchor ring slit. Inner wall (solid inside r_in) and outer wall (solid outside r_out) are chord facets on
+    their own angle lists (Fusion tessellates them independently); down-facing annulus ceiling at z=h, zipper-
+    triangulated over the merged angles. Verts welded at the end."""
+    verts: list[Vec] = []
+    tris: list[Tri] = []
+
+    def add_tri(a: Vec, b: Vec, c: Vec, out: Vec) -> None:
+        if _dot(_cross(_sub(b, a), _sub(c, a)), out) < 0.0:
+            b, c = c, b
+        base = len(verts)
+        verts.extend([a, b, c])
+        tris.append((base, base + 1, base + 2))
+
+    def pt(r: float, a_deg: float, z: float) -> Vec:
+        a = math.radians(a_deg)
+        return (r * math.cos(a), r * math.sin(a), z)
+
+    for r, angles, sign in ((r_in, ai_deg, 1.0), (r_out, ao_deg, -1.0)):
+        for a0, a1 in zip(angles, angles[1:]):
+            m = math.radians((a0 + a1) / 2.0)
+            out: Vec = (sign * math.cos(m), sign * math.sin(m), 0.0)
+            p0, p1, p2, p3 = pt(r, a0, 0.0), pt(r, a1, 0.0), pt(r, a1, h), pt(r, a0, h)
+            add_tri(p0, p1, p2, out)
+            add_tri(p0, p2, p3, out)
+    down: Vec = (0.0, 0.0, -1.0)
+    i = j = 0
+    ni, no = len(ai_deg) - 1, len(ao_deg) - 1
+    while i < ni or j < no:
+        nxt_i = ai_deg[i + 1] if i < ni else math.inf
+        nxt_o = ao_deg[j + 1] if j < no else math.inf
+        if nxt_i <= nxt_o:
+            add_tri(pt(r_in, ai_deg[i], h), pt(r_in, ai_deg[i + 1], h), pt(r_out, ao_deg[j], h), down)
+            i += 1
+        else:
+            add_tri(pt(r_in, ai_deg[i], h), pt(r_out, ao_deg[j], h), pt(r_out, ao_deg[j + 1], h), down)
+            j += 1
+    return weld(Mesh(verts=verts, tris=tris), 1e-6)
+
+
+def test_slit_ring_matched_chord_walls_not_overhang() -> None:
+    n24 = [i * 15.0 for i in range(25)]
+    rep = check(_ring_slit(n24, n24, 6.0, 6.1))
+    assert rep.overhang_area_mm2 == pytest.approx(0.0, abs=1e-9)
+
+
+def test_slit_ring_mismatched_chord_walls_not_overhang() -> None:
+    # 24-gon inner / 20-gon outer, 0.1 mm gap. Current exact-inside foot test drops ceiling tris whose
+    # centroid foot misses a chord facet by ~0.002 mm (chord tessellation), so they read as bridge.
+    n24 = [i * 15.0 for i in range(25)]
+    n20 = [i * 18.0 for i in range(21)]
+    rep = check(_ring_slit(n24, n20, 6.0, 6.1))
+    assert rep.overhang_area_mm2 == pytest.approx(0.0, abs=1e-9)
+
+
+def test_bridge_ring_wider_than_slit_max_stays_overhang() -> None:
+    # 0.8 mm ring bridge over 24-gon chords: whole annulus ceiling must stay overhang.
+    # 24-gon area = (24/2) * R^2 * sin(2*pi/24) = 12 * sin(15 deg) * R^2; annulus = outer - inner.
+    n24 = [i * 15.0 for i in range(25)]
+    rep = check(_ring_slit(n24, n24, 5.6, 6.4))
+    area = 12.0 * math.sin(math.radians(15.0)) * (6.4**2 - 5.6**2)
+    assert rep.overhang_area_mm2 == pytest.approx(area, rel=1e-6)
+
+
+# B-rep slit ceiling width (check_body path): flat annulus = 2 concentric loops. Fake Fusion objects, lengths in cm.
+def _ring_ceiling_face(
+    r_in_mm: float, r_out_mm: float, z_mm: float = 7.0, inner_dx_mm: float = 0.0, faces: list[Any] | None = None
+) -> Any:
+    # Any: fake BRepFace (same convention as _no_body in test_groove_exempt_offline).
+    def loop(r_mm: float, dx_mm: float) -> SimpleNamespace:
+        geom = SimpleNamespace(center=SimpleNamespace(x=dx_mm / 10.0, y=0.0, z=z_mm / 10.0), radius=r_mm / 10.0)
+        return _with_faces(SimpleNamespace(isOuter=False, edges=[SimpleNamespace(geometry=geom)]), faces)
+
+    return SimpleNamespace(loops=[loop(r_out_mm, 0.0), loop(r_in_mm, inner_dx_mm)])
+
+
+def test_annulus_width_flat_ring_0_1_mm_within_slit_max() -> None:
+    width = pb._annulus_width_mm(_ring_ceiling_face(6.0, 6.1))
+    assert width == pytest.approx(0.1)
+    assert width is not None and width <= pb.SLIT_MAX_MM
+
+
+def test_annulus_width_flat_ring_0_8_mm_exceeds_slit_max() -> None:
+    width = pb._annulus_width_mm(_ring_ceiling_face(6.0, 6.8))
+    assert width == pytest.approx(0.8)
+    assert width is not None and width > pb.SLIT_MAX_MM
+
+
+def test_annulus_offset_centres_is_not_annulus() -> None:
+    assert pb._annulus_width_mm(_ring_ceiling_face(6.0, 6.1, inner_dx_mm=0.5)) is None
+
+
+# Short B-rep bridge (<= SHORT_BRIDGE_MAX_MM): fake edges (evaluator in cm, geometry mm), fake planar face.
+def _edge_stub(f: Callable[[float], tuple[float, float, float]], length_mm: float) -> SimpleNamespace:
+    def point(t: float) -> tuple[bool, SimpleNamespace]:
+        x, y, z = f(t)
+        return True, SimpleNamespace(x=x / 10.0, y=y / 10.0, z=z / 10.0)
+
+    evaluator = SimpleNamespace(getParameterExtents=lambda: (True, 0.0, 1.0), getPointAtParameter=point)
+    return SimpleNamespace(length=length_mm / 10.0, evaluator=evaluator)
+
+
+def _line(p: Vec, q: Vec) -> SimpleNamespace:
+    def f(t: float) -> Vec:
+        return (p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t, p[2] + (q[2] - p[2]) * t)
+
+    return _edge_stub(f, math.dist(p, q))
+
+
+def _arc(c: tuple[float, float], r: float, a0_deg: float, a1_deg: float, z: float) -> SimpleNamespace:
+    def f(t: float) -> Vec:
+        a = math.radians(a0_deg + (a1_deg - a0_deg) * t)
+        return (c[0] + r * math.cos(a), c[1] + r * math.sin(a), z)
+
+    return _edge_stub(f, r * math.radians(abs(a1_deg - a0_deg)))
+
+
+def _with_faces(loop: SimpleNamespace, faces: list[Any] | None) -> SimpleNamespace:
+    # BRepEdge.faces per edge = neighbours sharing that edge. None / [] = open edge, nothing attached.
+    for e in loop.edges:
+        e.faces = list(faces or [])
+    return loop
+
+
+def _neighbour(bottom_z_mm: float) -> SimpleNamespace:
+    # neighbour B-rep face (tempId != bridge face), bbox bottom at bottom_z_mm. Below the bridge plane = material under the edge.
+    return SimpleNamespace(tempId="wall", boundingBox=SimpleNamespace(minPoint=SimpleNamespace(z=bottom_z_mm / 10.0)))
+
+
+@pytest.fixture
+def pinned_features(monkeypatch: pytest.MonkeyPatch) -> None:
+    # _brep_short_bridge imports fusion_kit.features lazily; earlier tests purge fusion_kit modules and re-import
+    # under mocked adsk (AttributeError: ExtrudeFeature). Pin the module imported at collection.
+    monkeypatch.setitem(sys.modules, "fusion_kit.features", _features)
+
+
+def _down_face(loops: list[SimpleNamespace], normal_z: float = -1.0) -> Any:  # Any: fake BRepFace
+    n = SimpleNamespace(x=0.0, y=0.0, z=normal_z)
+    return SimpleNamespace(
+        tempId="bridge",
+        loops=loops,
+        pointOnFace=SimpleNamespace(x=0.0, y=0.0, z=0.7),
+        evaluator=SimpleNamespace(getNormalAtPoint=lambda p: (True, n)),
+    )
+
+
+def _rect_loop(x: float, y: float, z: float = 7.0, faces: list[Any] | None = None) -> SimpleNamespace:
+    # edges: [0] y=0 long side, [1] x=x short end, [2] y=y long side, [3] x=0 short end (x long when x > y)
+    p = [(0.0, 0.0, z), (x, 0.0, z), (x, y, z), (0.0, y, z)]
+    return _with_faces(SimpleNamespace(isOuter=True, edges=[_line(p[i], p[(i + 1) % 4]) for i in range(4)]), faces)
+
+
+def _stadium_loop(z: float = 7.0, faces: list[Any] | None = None) -> SimpleNamespace:
+    # rib end 0.8 mm wide, 1.2 mm long: 2 straight edges + 2 semicircular arcs (r 0.4)
+    return _with_faces(
+        SimpleNamespace(
+            isOuter=True,
+            edges=[
+                _line((0.4, 0.0, z), (0.8, 0.0, z)),
+                _arc((0.8, 0.4), 0.4, -90.0, 90.0, z),
+                _line((0.8, 0.8, z), (0.4, 0.8, z)),
+                _arc((0.4, 0.4), 0.4, 90.0, 270.0, z),
+            ],
+        ),
+        faces,
+    )
+
+
+def test_short_bridge_rib_end_0_8_mm_exempt(pinned_features: None) -> None:
+    assert pb._brep_short_bridge(_down_face([_stadium_loop(faces=[_neighbour(0.0)])])) is True
+
+
+def test_short_bridge_rect_0_9_mm_exempt_1_1_mm_not(pinned_features: None) -> None:
+    assert pb._brep_short_bridge(_down_face([_rect_loop(3.0, 0.9, faces=[_neighbour(0.0)])])) is True
+    assert pb._brep_short_bridge(_down_face([_rect_loop(3.0, 1.1, faces=[_neighbour(0.0)])])) is False
+
+
+def test_short_bridge_rect_1_5_mm_not_exempt(pinned_features: None) -> None:
+    assert pb._brep_short_bridge(_down_face([_rect_loop(3.0, 1.5)])) is False
+
+
+def test_short_bridge_ring_0_1_mm_exempt(pinned_features: None) -> None:
+    assert pb._brep_short_bridge(_down_face(_ring_ceiling_face(6.0, 6.1, faces=[_neighbour(0.0)]).loops)) is True
+
+
+def test_short_bridge_ring_6_8_not_exempt(pinned_features: None) -> None:
+    assert pb._brep_short_bridge(_down_face(_ring_ceiling_face(6.0, 8.0).loops)) is False
+
+
+@pytest.mark.parametrize("neighbours", [[], [_neighbour(7.0)]], ids=["open_edges", "walls_rise_from_plane"])
+def test_short_bridge_cantilever_rib_30_mm_not_exempt(pinned_features: None, neighbours: list[Any]) -> None:
+    # 0.8 x 30 mm underside in mid-air: long sides meet nothing below it (no neighbour, or walls only up from the plane)
+    assert pb._brep_short_bridge(_down_face([_rect_loop(30.0, 0.8, faces=neighbours)])) is False
+
+
+def test_short_bridge_one_long_side_unsupported_not_exempt(pinned_features: None) -> None:
+    loop = _rect_loop(30.0, 0.8)
+    loop.edges[0].faces = [_neighbour(0.0)]  # y=0 long side supported, y=0.8 long side open
+    assert pb._brep_short_bridge(_down_face([loop])) is False
+
+
+def test_short_bridge_rib_30_mm_supported_both_long_sides_exempt(pinned_features: None) -> None:
+    loop = _rect_loop(30.0, 0.8)
+    loop.edges[0].faces = [_neighbour(0.0)]
+    loop.edges[2].faces = [_neighbour(0.0)]
+    assert pb._brep_short_bridge(_down_face([loop])) is True
+
+
+def test_short_bridge_ring_without_support_not_exempt(pinned_features: None) -> None:
+    assert pb._brep_short_bridge(_down_face(_ring_ceiling_face(6.0, 6.1).loops)) is False
+
+
+def test_short_bridge_up_facing_not_exempt(pinned_features: None) -> None:
+    assert pb._brep_short_bridge(_down_face([_stadium_loop()], normal_z=1.0)) is False
+
+
+def test_short_bridge_non_planar_boundary_not_exempt(pinned_features: None) -> None:
+    # one corner lifted 0.5 mm: boundary leaves the face plane -> not a flat bridge
+    lifted = SimpleNamespace(
+        isOuter=True,
+        edges=[
+            _line((0.0, 0.0, 7.0), (1.0, 0.0, 7.0)),
+            _line((1.0, 0.0, 7.0), (1.0, 0.5, 7.0)),
+            _line((1.0, 0.5, 7.0), (0.0, 0.5, 7.5)),
+            _line((0.0, 0.5, 7.5), (0.0, 0.0, 7.0)),
+        ],
+    )
+    assert pb._brep_short_bridge(_down_face([lifted])) is False
+
+
+def test_short_bridge_no_loops_not_exempt(pinned_features: None) -> None:
+    assert pb._brep_short_bridge(_down_face([])) is False
+
+
+# Short cantilever (<= CANTILEVER_MAX_MM reach from ONE supported edge, P26): planar down-facing 1-loop face.
+def _one_supported(loop: SimpleNamespace, idx: int) -> SimpleNamespace:
+    # only edge idx borders material below the bridge plane; all other edges are open
+    for i, e in enumerate(loop.edges):
+        e.faces = [_neighbour(0.0)] if i == idx else []
+    return loop
+
+
+def _bad_edge() -> Any:  # Any: fake BRepEdge
+    # Fusion evaluator refusing a parameter: RuntimeError, as seen on live side_wall bed faces
+    def point(t: float) -> tuple[bool, SimpleNamespace]:
+        raise RuntimeError("3 : invalid argument parameter")
+
+    evaluator = SimpleNamespace(getParameterExtents=lambda: (True, 0.0, 1.0), getPointAtParameter=point)
+    return SimpleNamespace(length=1.0, evaluator=evaluator)
+
+
+def test_cantilever_fin_reach_0_69_one_supported_edge_exempt(pinned_features: None) -> None:
+    # 1.5 x 0.69 mm fin, supported edge y=0, far side y=0.69 -> reach 0.69 <= 1.0
+    assert pb._brep_short_cantilever(_down_face([_one_supported(_rect_loop(1.5, 0.69), 0)])) is True
+
+
+def test_cantilever_reach_1_0_on_long_edge_exempt(pinned_features: None) -> None:
+    # 30 x 1.0 mm rib attached along the long edge: reach 1.0 == CANTILEVER_MAX_MM -> exempt
+    assert pb._brep_short_cantilever(_down_face([_one_supported(_rect_loop(30.0, 1.0), 0)])) is True
+
+
+def test_cantilever_reach_1_5_one_supported_edge_flagged(pinned_features: None) -> None:
+    # 3 x 1.5 mm, supported edge y=0, far side y=1.5 -> reach 1.5 > 1.0
+    assert pb._brep_short_cantilever(_down_face([_one_supported(_rect_loop(3.0, 1.5), 0)])) is False
+
+
+def test_cantilever_rib_30_mm_attached_short_end_flagged(pinned_features: None) -> None:
+    # 30 x 0.8 mm rib attached along short end x=30 -> reach 30 > 1.0
+    assert pb._brep_short_cantilever(_down_face([_one_supported(_rect_loop(30.0, 0.8), 1)])) is False
+
+
+def test_cantilever_no_supported_edge_flagged(pinned_features: None) -> None:
+    assert pb._brep_short_cantilever(_down_face([_rect_loop(1.5, 0.69)])) is False
+
+
+def test_cantilever_up_facing_flagged(pinned_features: None) -> None:
+    assert pb._brep_short_cantilever(_down_face([_one_supported(_rect_loop(1.5, 0.69), 0)], normal_z=1.0)) is False
+
+
+def test_cantilever_two_loops_flagged(pinned_features: None) -> None:
+    ring = _ring_ceiling_face(6.0, 6.1, faces=[_neighbour(0.0)])
+    assert pb._brep_short_cantilever(_down_face(ring.loops)) is False
+
+
+def test_edge_evaluator_runtime_error_becomes_value_error() -> None:
+    with pytest.raises(ValueError):
+        pb._edge_points_mm(_bad_edge())
+
+
+def test_cantilever_evaluator_runtime_error_raises_value_error_not_exempt(pinned_features: None) -> None:
+    # check_body.overhang_ok catches ValueError -> facet stays flagged, no crash
+    loop = _with_faces(SimpleNamespace(isOuter=True, edges=[_bad_edge()]), [_neighbour(0.0)])
+    with pytest.raises(ValueError):
+        pb._brep_short_cantilever(_down_face([loop]))
+
+
+def test_min_width_rect_is_short_side() -> None:
+    pts = [(0.0, 0.0, 0.0), (3.0, 0.0, 0.0), (3.0, 1.5, 0.0), (0.0, 1.5, 0.0)]
+    assert pb._min_width_mm(pts, (0.0, 0.0, 1.0)) == pytest.approx(1.5, abs=1e-9)
 
 
 # ---------------------------------------------------------------------------

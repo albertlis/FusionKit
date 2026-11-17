@@ -11,6 +11,8 @@ import pytest
 from fusion_kit import printability
 from fusion_kit.dfam import (
     EdgeFact,
+    EdgeKind,
+    EdgeTreatment,
     _groove_rects,
     _warp_family,
     _warp_grooves,
@@ -18,6 +20,13 @@ from fusion_kit.dfam import (
     in_warp_groove,
 )
 from fusion_kit.printability import IDENTITY, Mesh, check, rot_z, sweep
+
+
+@pytest.fixture(autouse=True)
+def _identity_print_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    # check_body(None, ...) in this file: no body attributes; bed '-z' by definition -> print frame = body itself
+    monkeypatch.setattr(printability, "print_frame_body", lambda body: body)
+
 
 Vec = tuple[float, float, float]
 # Two parallel 0.8 mm gaps, 30 mm pitch -> warp family (>= 2 grooves along x)
@@ -101,7 +110,7 @@ def _slot_face(x0: float, y0: float, x1: float, y1: float) -> Any:
     )
 
 
-def _edge(kind: str, treatment: str, in_groove: bool = False, size: float = 0.0) -> EdgeFact:
+def _edge(kind: EdgeKind, treatment: EdgeTreatment, in_groove: bool = False, size: float = 0.0) -> EdgeFact:
     return EdgeFact(label="e", kind=kind, treatment=treatment, size_mm=size, room_mm=10.0, in_warp_groove=in_groove)
 
 
@@ -207,9 +216,46 @@ def test_groove_rects_two_through_strips() -> None:
     assert len(rects) == 1
     ax, rect = rects[0]
     assert ax == 0
-    assert rect == pytest.approx((0.0, 29.6, 90.0, 30.4))
+    assert rect == pytest.approx((-0.29, 29.6, 90.29, 30.4), abs=0.005)  # no span: chamfer run 0.29 mm each end
     assert _warp_grooves(rects) is False  # one groove is not two
     assert _warp_grooves(rects + [(0, (0.0, 59.6, 90.0, 60.4))]) is True
+
+
+def _strip_mm(lo: tuple[float, float], hi: tuple[float, float]) -> Any:
+    """Bed face given in mm (x, y); _strip takes cm."""
+    return _strip((lo[0] / 10, lo[1] / 10), (hi[0] / 10, hi[1] / 10))
+
+
+def test_groove_rects_unequal_span_dovetail_pairs_recognised() -> None:
+    # 3 grooves along y at x = 0, +-30 mm. Outer strips reach 0.583 mm further in -y (dovetail tongue) than the
+    # middle strips. Pairs at x = +-30 have unequal y spans, shared y interval -81.034..-72.966 (8.068 mm).
+    lo_y_out, lo_y_mid, hi_y = -81.617, -81.034, -72.966
+    strips = [
+        _strip_mm((-45.0, lo_y_out), (-30.4, hi_y)),
+        _strip_mm((-29.6, lo_y_mid), (-0.4, hi_y)),
+        _strip_mm((0.4, lo_y_mid), (29.6, hi_y)),
+        _strip_mm((30.4, lo_y_out), (45.0, hi_y)),
+    ]
+    rects = _groove_rects(strips)
+    assert len(rects) == 3
+    assert all(ax == 1 for ax, _r in rects)
+    got = sorted(r for _ax, r in rects)
+    # y ends run 0.29 mm past the bed-face overlap each side (chamfer run, dfam._groove_rects)
+    assert got[0] == pytest.approx((-30.4, lo_y_mid - 0.29, -29.6, hi_y + 0.29), abs=0.005)
+    assert got[1] == pytest.approx((-0.4, lo_y_mid - 0.29, 0.4, hi_y + 0.29), abs=0.005)
+    assert got[2] == pytest.approx((29.6, lo_y_mid - 0.29, 30.4, hi_y + 0.29), abs=0.005)
+    assert len(_warp_family(rects)) == 3
+
+
+def test_groove_rects_overlap_below_threshold_not_groove() -> None:
+    # 0.8 mm gap along x, but shared y interval 29..30 mm = 1 mm < max(2 mm, 0.5 x shorter span 30 mm) -> no groove
+    strips = [
+        _strip_mm((-30.0, 0.0), (-0.4, 30.0)),
+        _strip_mm((0.4, 29.0), (30.0, 60.0)),
+    ]
+    rects = _groove_rects(strips)
+    assert rects == []
+    assert _warp_family(rects) == []
 
 
 # ---------------------------------------------------------------------------
@@ -269,16 +315,23 @@ def test_rotated_orientation_no_exemption() -> None:
     assert res["rz"].overhang_area_mm2 == pytest.approx(30.0 * 0.8)
 
 
+def _no_body() -> Any:
+    # check_body is wired to monkeypatched helpers that ignore the body: None stands in for BRepBody.
+    # Any so basedpyright accepts it for the typed body arg (same convention as test_holes_offline._body).
+    return None
+
+
 def test_check_body_rects_identity_only(monkeypatch: pytest.MonkeyPatch) -> None:
     # check_body wiring: family rects from body passed for identity orientation only
     mesh = _with_bed(_box(0.0, 0.0, 0.3, 30.0, 0.8, 3.0))
     monkeypatch.setattr(printability, "mesh_from_body", lambda body, quality: mesh)
     monkeypatch.setattr(printability, "warp_family_mm", lambda body: [(0, (0.0, 0.0, 30.0, 0.8))])
     monkeypatch.setattr(printability, "_brep_overhang_deg", lambda body, point: None)  # no B-rep lookup (body None)
-    assert printability.check_body(None, IDENTITY).overhang_area_mm2 == 0.0
-    assert printability.check_body(None, rot_z(90.0)).overhang_area_mm2 == pytest.approx(30.0 * 0.8)
+    monkeypatch.setattr(printability, "_brep_slit_ceiling", lambda body, points: False)  # same, slit path
+    assert printability.check_body(_no_body(), IDENTITY).overhang_area_mm2 == 0.0
+    assert printability.check_body(_no_body(), rot_z(90.0)).overhang_area_mm2 == pytest.approx(30.0 * 0.8)
     monkeypatch.setattr(printability, "warp_family_mm", lambda body: [])  # no warp pattern -> no exemption
-    assert printability.check_body(None, IDENTITY).overhang_area_mm2 == pytest.approx(30.0 * 0.8)
+    assert printability.check_body(_no_body(), IDENTITY).overhang_area_mm2 == pytest.approx(30.0 * 0.8)
 
 
 def test_groove_rect_extends_to_body_footprint() -> None:
@@ -290,7 +343,7 @@ def test_groove_rect_extends_to_body_footprint() -> None:
     assert got[0] == pytest.approx((0.0, 29.6, 90.0, 30.4))
     assert got[1] == pytest.approx((0.0, 59.6, 90.0, 60.4))
     assert in_warp_groove((0.773, 30.0, 0.3), rects, 0.0) is True  # groove end segment at plate edge
-    assert in_warp_groove((0.773, 30.0, 0.3), _groove_rects(strips), 0.0) is False  # old rect stops at x=1
+    assert in_warp_groove((0.5, 30.0, 0.3), _groove_rects(strips), 0.0) is False  # no span: rect ends 1 - 0.29 = 0.71
 
 
 def test_groove_rect_far_end_not_extended() -> None:
@@ -298,8 +351,8 @@ def test_groove_rect_far_end_not_extended() -> None:
     strips = [_strip((1.0, 0.0), (8.0, 2.96)), _strip((1.0, 3.04), (8.0, 5.96)), _strip((1.0, 6.04), (8.0, 9.0))]
     rects = _groove_rects(strips, ((0.0, 0.0, 0.0), (90.0, 90.0, 0.0)))
     got = sorted(r for _ax, r in rects)
-    assert got[0] == pytest.approx((10.0, 29.6, 80.0, 30.4))
-    assert got[1] == pytest.approx((10.0, 59.6, 80.0, 60.4))
+    assert got[0] == pytest.approx((9.71, 29.6, 80.29, 30.4), abs=0.005)  # chamfer run 0.29 mm each end
+    assert got[1] == pytest.approx((9.71, 59.6, 80.29, 60.4), abs=0.005)  # chamfer run 0.29 mm each end
     assert in_warp_groove((5.0, 30.0, 0.3), rects, 0.0) is False  # collinear bed notch 5 mm past strip end: not exempt
     flag = in_warp_groove((5.0, 30.0, 0.0), rects, 0.0)
     assert [(f.rule, f.level) for f in check_edges([_edge("bed", "sharp", in_groove=flag)])] == [

@@ -72,7 +72,7 @@ def _face(
 ) -> SimpleNamespace:
     return SimpleNamespace(
         name=name,
-        entityToken=f"f:{name}",
+        tempId=f"f:{name}",
         geometry=SimpleNamespace(tag="plane"),
         normal=_v(*normal),
         boundingBox=SimpleNamespace(minPoint=_v(*lo), maxPoint=_v(*hi)),
@@ -93,7 +93,7 @@ def _edge(
 ) -> SimpleNamespace:
     mid = tuple((a + b) / 2 for a, b in zip(p, q))
     e = SimpleNamespace(
-        entityToken=token,
+        tempId=token,
         geometry=SimpleNamespace(tag="line"),
         faces=[fa, fb],
         startVertex=SimpleNamespace(geometry=_v(*p)),
@@ -213,7 +213,7 @@ def test_dfam_check_fail_as_warn_downgrades_fail_only(
         vertical_wall_mm=[],
         has_cavity=False,
     )
-    monkeypatch.setattr(dfam, "facts_from_body", lambda body: (bf, [], []))
+    monkeypatch.setattr(dfam, "facts_from_body", lambda body, tags=None: (bf, [], []))
     body = MagicMock(attributes=_Attrs())
     assert [(f.rule, f.level) for f in dfam_check(body)] == [("warp_grooves", "FAIL")]
     assert [(f.rule, f.level) for f in dfam_check(body, fail_as_warn=True)] == [("warp_grooves", "WARN")]
@@ -278,3 +278,38 @@ def test_report_dfam_off(design_stub: None, monkeypatch: pytest.MonkeyPatch) -> 
     assert "bodies=1" in text
     assert "dfam=" not in text
     assert "\n" not in text
+
+
+def test_report_data_fields_dfam_off(design_stub: None) -> None:
+    data = rep_mod.report_data(_comp(2), dfam=False)
+    assert data.name == "comp"
+    assert data.bodies == 2
+    assert data.lumps == 2
+    assert data.bbox_mm == pytest.approx((20.0, 20.0, 10.0))
+    assert data.vol_cm3 == pytest.approx(0.8)
+    assert (data.sketches_constrained, data.sketches_total) == (0, 0)
+    assert (data.unhealthy, data.unnamed, data.numbered) == (0, 0, 0)
+    assert data.findings is None
+
+
+def test_report_data_no_bodies_text(design_stub: None) -> None:
+    data = rep_mod.report_data(_comp(0), dfam=False)
+    assert data.bbox_mm is None
+    assert data.vol_cm3 == 0.0
+    assert rep_mod.format_report(data) == (
+        "comp: bodies=0 lumps=0 bbox=no-bodies vol=0cm3 sketches=0/0 constrained "
+        "design_timeline_unhealthy=0 timeline_unnamed=0 timeline_numbered=0"
+    )
+
+
+def test_report_text_is_format_report_of_data(design_stub: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        rep_mod,
+        "dfam_check",
+        lambda body, fail_as_warn=False: [Finding("warp_grooves", "FAIL", "x")],
+    )
+    comp = _comp(1)
+    data = rep_mod.report_data(comp)
+    assert data.findings is not None
+    assert len(data.findings) == 1
+    assert rep_mod.report(comp) == rep_mod.format_report(data)

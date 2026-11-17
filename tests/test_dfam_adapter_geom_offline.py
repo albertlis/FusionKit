@@ -63,7 +63,7 @@ def _face(
 ) -> SimpleNamespace:
     return SimpleNamespace(
         name=name,
-        entityToken=f"f:{name}",
+        tempId=f"f:{name}",
         geometry=SimpleNamespace(tag=tag),
         normal=_v(*normal),
         boundingBox=SimpleNamespace(minPoint=_v(*lo), maxPoint=_v(*hi)),
@@ -83,7 +83,7 @@ def _edge(
     q: tuple[float, float, float],
 ) -> SimpleNamespace:
     e = SimpleNamespace(
-        entityToken=token,
+        tempId=token,
         geometry=SimpleNamespace(tag="line"),
         faces=[fa, fb],
         startVertex=SimpleNamespace(geometry=_v(*p)),
@@ -144,9 +144,7 @@ def _hole_body(halves: int) -> MagicMock:
 
 def _loop(lo: tuple[float, float, float], hi: tuple[float, float, float], *, outer: bool = False) -> SimpleNamespace:
     """Bed-face loop whose single edge spans lo..hi (cm). Inner loop = hole / groove outline."""
-    edge = SimpleNamespace(
-        entityToken=f"loop:{lo}:{hi}", boundingBox=SimpleNamespace(minPoint=_v(*lo), maxPoint=_v(*hi))
-    )
+    edge = SimpleNamespace(tempId=f"loop:{lo}:{hi}", boundingBox=SimpleNamespace(minPoint=_v(*lo), maxPoint=_v(*hi)))
     return SimpleNamespace(isOuter=outer, edges=[edge])
 
 
@@ -341,7 +339,7 @@ def _arc_edge(
 ) -> SimpleNamespace:
     """Curved (non-Line3D) edge between fa and fb, midpoint mid (cm), length_cm (Fusion cm)."""
     e = SimpleNamespace(
-        entityToken=token,
+        tempId=token,
         geometry=SimpleNamespace(tag="arc"),
         faces=[fa, fb],
         startVertex=SimpleNamespace(geometry=_v(*mid)),
@@ -420,6 +418,49 @@ def test_bed_edge_tangent_fillet_is_fillet_fail(casts: None, geom_features: None
     assert [(e.kind, e.treatment) for e in edges] == [("bed", "fillet")]
     assert edges[0].size_mm == pytest.approx(radius, abs=1e-6)
     assert [(f.rule, f.level) for f in check_edges(edges)] == [("bed_chamfer", "FAIL")]
+
+
+def _pin_body(*, inward_wall: bool = False) -> MagicMock:
+    """2 x 2 x 1 cm: plate top z=0.5 cm, convex pin r=0.3 cm at (1,1) up to z=1 cm.
+
+    Concave base arc (plate / wall, z=0.5) and convex tip arc (wall / top, z=1). inward_wall=True: wall normal
+    points at the axis (= hole wall), no pin.
+    """
+    plate = _face("plate", (0, 0, 1), (0, 0, 0.5), (2, 2, 0.5))
+    tip = _face("tip", (0, 0, 1), (0.7, 0.7, 1), (1.3, 1.3, 1))
+    s = -1.0 if inward_wall else 1.0
+    wall = _face("wall", (s * -_S, s * -_S, 0), (0.7, 0.7, 0.5), (1.3, 1.3, 1))
+    wall.geometry = SimpleNamespace(tag="cyl", axis=_v(0, 0, 1), origin=_v(1, 1, 0), radius=0.3)
+    wall.pointOnFace = _v(1 - 0.3 * _S, 1 - 0.3 * _S, 0.75)
+    wall.evaluator = SimpleNamespace(
+        parametricRange=lambda: SimpleNamespace(minPoint=_v(0, 0, 0), maxPoint=_v(2 * math.pi, 0, 0))
+    )
+    e_base = _arc_edge("base_arc", plate, wall, (1 - 0.3 * _S, 1 - 0.3 * _S, 0.5), math.pi / 2 * 0.3)
+    e_tip = _arc_edge("tip_arc", tip, wall, (1 - 0.3 * _S, 1 - 0.3 * _S, 1.0), math.pi / 2 * 0.3)
+    return _body([plate, tip, wall], [e_base, e_tip])
+
+
+def test_pin_base_sharp_fails_tip_rim_ignored(
+    casts: None, geom_features: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # base concave, tip rim convex (outer corner): only base is a pin_base fact
+    monkeypatch.setattr(
+        features, "convex_edges", lambda body, edges, probe_mm=0.1: [e for e in edges if e.tempId == "tip_arc"]
+    )
+    _, holes, edges = facts_from_body(_pin_body())
+    assert holes == []
+    assert [(e.kind, e.treatment) for e in edges] == [("pin_base", "sharp")]
+    assert [(f.rule, f.level) for f in check_edges(edges)] == [("pin_base_chamfer", "FAIL")]
+
+
+def test_hole_wall_not_pin_base(casts: None, geom_features: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    # same geometry, wall normal toward axis = hole: no pin_base fact, no pin_base_chamfer finding
+    monkeypatch.setattr(
+        features, "convex_edges", lambda body, edges, probe_mm=0.1: [e for e in edges if e.tempId == "tip_arc"]
+    )
+    _, _holes, edges = facts_from_body(_pin_body(inward_wall=True))
+    assert [e for e in edges if e.kind == "pin_base"] == []
+    assert [f for f in check_edges(edges) if f.rule == "pin_base_chamfer"] == []
 
 
 def _cone_face(split: bool) -> tuple[SimpleNamespace, SimpleNamespace]:

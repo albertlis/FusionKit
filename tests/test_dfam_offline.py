@@ -191,6 +191,22 @@ def test_bed_sharp_fails() -> None:
     assert out[0].level == "FAIL"
 
 
+@pytest.mark.parametrize(
+    ("length", "level"),
+    [
+        (1.4, "WARN"),  # short bed segment between dovetail tongue chamfers: left sharp on purpose
+        (3.0, "FAIL"),  # BED_SHORT_EDGE_MM boundary: rule is length < 3.0
+        (5.0, "FAIL"),
+    ],
+)
+def test_bed_sharp_short_edge_warns(length: float, level: str) -> None:
+    out = dfam.check_edges([_edge(kind="bed", treatment="sharp", size_mm=0.0, room_mm=5.0, length_mm=length)])
+    assert _rules(out) == ["bed_chamfer"]
+    assert out[0].level == level
+    if level == "WARN":
+        assert "left sharp" in out[0].msg
+
+
 def test_bed_fillet_fails_with_chamfer_msg() -> None:
     out = dfam.check_edges([_edge(kind="bed", treatment="fillet", size_mm=1.0, room_mm=5.0)])
     assert _rules(out) == ["bed_chamfer"]
@@ -239,6 +255,89 @@ def test_mating_chamfer_min_0_3(size: float, expected: list[str]) -> None:
 def test_mating_fillet_not_flagged_per_spec() -> None:
     # spec lists only sharp and chamfer<0.3 for mating edges
     assert dfam.check_edges([_edge(kind="mating", treatment="fillet", size_mm=0.1)]) == []
+
+
+# ---------------------------------------------------------------------------
+# pin_base_chamfer: concave base of a convex pin (sharp / chamfer or fillet < 0.3 FAIL)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("treatment", "size", "expected"),
+    [
+        ("sharp", 0.0, ["pin_base_chamfer"]),
+        ("chamfer", 0.29, ["pin_base_chamfer"]),
+        ("chamfer", 0.3, []),
+        ("fillet", 0.1, ["pin_base_chamfer"]),
+        ("fillet", 0.3, []),
+    ],
+)
+def test_pin_base_matrix(treatment: str, size: float, expected: list[str]) -> None:
+    out = dfam.check_edges([_edge(kind="pin_base", treatment=treatment, size_mm=size)])
+    assert _rules(out) == expected
+    assert all(f.level == "FAIL" for f in out)
+
+
+def test_pin_base_skip_opt_out() -> None:
+    assert "pin_base_chamfer" in dfam.SKIPPABLE_RULES
+    assert (
+        dfam.format_skip({"pin_base_chamfer": "print on fillet-free pin"})
+        == "pin_base_chamfer:print on fillet-free pin"
+    )
+    edges = [_edge(kind="pin_base", treatment="sharp", size_mm=0.0)]
+    assert _rules(dfam.check_all(_body(), [], edges, {})) == ["pin_base_chamfer"]
+    out = dfam.check_all(_body(), [], edges, {"pin_base_chamfer": "pin base sits on a boss"})
+    assert _rules(out) == ["dfam_skip"]
+    assert out[0].level == "WARN"
+
+
+def test_pin_base_grip_fin_exempt() -> None:
+    # FAIL on old code: pin_base not in the on_grip_fin skip, sharp fin root at shaft -> pin_base_chamfer FAIL
+    assert dfam.check_edges([_edge(kind="pin_base", treatment="sharp", size_mm=0.0, on_grip_fin=True)]) == []
+
+
+@pytest.mark.parametrize(
+    ("slit_width", "expected"),
+    [
+        (0.1, []),
+        (dfam.SLIT_MAX_MM, []),
+        (0.25, ["pin_base_chamfer"]),
+        (None, ["pin_base_chamfer"]),
+    ],
+)
+def test_pin_base_slit_floor_exempt(slit_width: float | None, expected: list[str]) -> None:
+    # FAIL on old code: EdgeFact had no slit_width_mm (TypeError), and 0.1 mm slit floor FAILed as sharp pin base
+    out = dfam.check_edges([_edge(kind="pin_base", treatment="sharp", size_mm=0.0, slit_width_mm=slit_width)])
+    assert _rules(out) == expected
+
+
+# ---------------------------------------------------------------------------
+# grip_fin_sliver: grip_fit min fin tangential width over lead-in band < GRIP_FIN_SECTION_MIN_MM (0.4) = FAIL.
+# FAIL on old code: rule did not exist (no finding for 0.39).
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("section", "expected"),
+    [
+        (0.8, []),
+        (0.4, []),
+        (0.39, ["grip_fin_sliver"]),
+        (0.0, ["grip_fin_sliver"]),
+        (None, []),  # no grip fin on body: rule silent
+    ],
+)
+def test_grip_fin_sliver_matrix(section: float | None, expected: list[str]) -> None:
+    out = dfam.check_body_facts(_body(grip_fin_section_mm=section))
+    assert _rules(out) == expected
+    assert all(f.level == "FAIL" for f in out)
+
+
+def test_grip_fin_sliver_skip_opt_out() -> None:
+    assert "grip_fin_sliver" in dfam.SKIPPABLE_RULES
+    assert dfam.GRIP_FIN_SECTION_MIN_MM == 0.4
+    assert _rules(dfam.check_all(_body(grip_fin_section_mm=0.2), [], [], {})) == ["grip_fin_sliver"]
+    out = dfam.check_all(
+        _body(grip_fin_section_mm=0.2), [], [], {"grip_fin_sliver": "print on a 0.3 mm fin on purpose"}
+    )
+    assert _rules(out) == ["dfam_skip"]
+    assert out[0].level == "WARN"
 
 
 # ---------------------------------------------------------------------------

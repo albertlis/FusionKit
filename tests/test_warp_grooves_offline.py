@@ -73,7 +73,7 @@ def test_relief_family_negates_pitch_on_negative_axis(
     axis = SimpleNamespace(geometry=SimpleNamespace(direction=direction))
     monkeypatch.setattr(features, axis_fn, lambda comp, **kwargs: axis)
     monkeypatch.setattr(features, "new_sketch", lambda comp, plane, *, label: SimpleNamespace(label=label))
-    monkeypatch.setattr(features, "_seed_rect", lambda sk, *corners: None)
+    monkeypatch.setattr(features, "_seed_rect", lambda sk, *corners, **kw: None)
     monkeypatch.setattr(features, "profile", lambda sk: "prof")
     monkeypatch.setattr(features, "extrude", lambda comp, prof, distance, **kwargs: "seed")
     pat = MagicMock(name="pattern_rectangular", return_value="pat")
@@ -101,13 +101,13 @@ def test_relief_family_negates_pitch_on_negative_axis(
 # _relief_family: pattern compute + seed centre (regression for live Fusion bugs)
 # ---------------------------------------------------------------------------
 def _run_family(
-    monkeypatch: pytest.MonkeyPatch, along: Literal["x", "y"], corners_out: list[tuple[str, ...]]
+    monkeypatch: pytest.MonkeyPatch, along: Literal["x", "y"], corners_out: list[tuple[Any, ...]]
 ) -> MagicMock:
     axis_fn = "axis_x_through" if along == "x" else "axis_y_through"
     axis = SimpleNamespace(geometry=SimpleNamespace(direction=SimpleNamespace(x=1.0, y=1.0, z=0.0)))
     monkeypatch.setattr(features, axis_fn, lambda comp, **kwargs: axis)
     monkeypatch.setattr(features, "new_sketch", lambda comp, plane, *, label: SimpleNamespace(label=label))
-    monkeypatch.setattr(features, "_seed_rect", lambda sk, *corners: corners_out.append(corners))
+    monkeypatch.setattr(features, "_seed_rect", lambda sk, *corners, **kw: corners_out.append(corners))
     monkeypatch.setattr(features, "profile", lambda sk: "prof")
     monkeypatch.setattr(features, "extrude", lambda comp, prof, distance, **kwargs: "seed")
     pat = MagicMock(name="pattern_rectangular", return_value="pat")
@@ -152,8 +152,8 @@ def test_seed_rect_dims_both_corners_to_origin(monkeypatch: pytest.MonkeyPatch) 
 
 def test_x_and_y_seed_centres_equal_expected_coordinate(monkeypatch: pytest.MonkeyPatch) -> None:
     # 100 mm span, pitch 30 -> centres -30/0/30 about body centre 50 -> first groove centre 20 mm for BOTH families.
-    corners_x: list[tuple[str, ...]] = []
-    corners_y: list[tuple[str, ...]] = []
+    corners_x: list[tuple[Any, ...]] = []
+    corners_y: list[tuple[Any, ...]] = []
     _run_family(monkeypatch, "x", corners_x)
     _run_family(monkeypatch, "y", corners_y)
     cx = corners_x[0]  # _seed_rect(s, x0, y0, x1, y1), mm floats

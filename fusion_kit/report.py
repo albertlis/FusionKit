@@ -1,12 +1,13 @@
 """Diagnostic report and measurement helpers for Fusion 360 scripts."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import adsk.core
 import adsk.fusion
 
 from fusion_kit import enums
-from fusion_kit.dfam import dfam_check, summarize_findings
+from fusion_kit.dfam import Finding, dfam_check, summarize_findings
 from fusion_kit.features import collection, face_normal
 from fusion_kit.timeline import label_stats
 
@@ -36,29 +37,48 @@ def report(comp: adsk.fusion.Component, dfam: bool = True) -> str:
     bbox is COMP-NATIVE coords (component's own frame, ignores occurrence transform). Moved/rotated occ -> use world_bbox(occ).
     design_timeline_unhealthy is design-wide, not comp-scoped. Timeline groups carry no health state -> skipped.
     """
+    text = format_report(report_data(comp, dfam))
+    print(text)
+    return text
+
+
+@dataclass(frozen=True)
+class ReportData:
+    """Facts behind report(), structured. findings None = dfam off; bbox_mm None = no bodies."""
+
+    name: str
+    bodies: int
+    lumps: int
+    bbox_mm: Xyz | None  # component-native coords, mm
+    vol_cm3: float  # sum of body volumes; 0.0 when no bodies
+    sketches_constrained: int
+    sketches_total: int
+    unhealthy: int  # design-wide, not comp-scoped
+    unnamed: int  # design-wide
+    numbered: int  # design-wide
+    findings: list[Finding] | None  # all bodies; None when dfam=False
+
+
+def report_data(comp: adsk.fusion.Component, dfam: bool = True) -> ReportData:
+    """Measurements behind report(), as data. Prints nothing. Field meaning: see report()."""
     app = adsk.core.Application.get()
     design = adsk.fusion.Design.cast(app.activeProduct)
 
     bodies = comp.bRepBodies.count
     lumps = sum(b.lumps.count for b in comp.bRepBodies)
 
-    # Bounding box (cm -> mm)
+    bbox_mm: Xyz | None = None
+    vol = 0.0
     if bodies > 0:
         lo, hi = _bbox_cm([b.boundingBox for b in comp.bRepBodies])
-        dx, dy, dz = ((h - l) * 10 for h, l in zip(hi, lo))
-        bbox = f"{dx:.1f}x{dy:.1f}x{dz:.1f}mm"
+        bbox_mm = ((hi[0] - lo[0]) * 10, (hi[1] - lo[1]) * 10, (hi[2] - lo[2]) * 10)
         vol = sum(b.physicalProperties.volume for b in comp.bRepBodies)
-        vol_str = f"{vol:.3f}cm3"
-    else:
-        bbox = "no-bodies"
-        vol_str = "0cm3"
 
-    # Sketch constraint status
     sketches = comp.sketches
     sk_total = sketches.count
     sk_constrained = sum(1 for i in range(sk_total) if sketches.item(i).isFullyConstrained)
 
-    # Design timeline unhealthy count (groups skipped: UnknownFeatureHealthState, not a fault)
+    # Groups skipped: UnknownFeatureHealthState, not a fault
     timeline = design.timeline
     items = [timeline.item(i) for i in range(timeline.count)]
     unhealthy = sum(
@@ -68,19 +88,40 @@ def report(comp: adsk.fusion.Component, dfam: bool = True) -> str:
     )
 
     unnamed, numbered = label_stats(design)
+    findings = [f for b in comp.bRepBodies for f in dfam_check(b)] if dfam else None
+    return ReportData(
+        name=comp.name,
+        bodies=bodies,
+        lumps=lumps,
+        bbox_mm=bbox_mm,
+        vol_cm3=vol,
+        sketches_constrained=sk_constrained,
+        sketches_total=sk_total,
+        unhealthy=unhealthy,
+        unnamed=unnamed,
+        numbered=numbered,
+        findings=findings,
+    )
+
+
+def format_report(data: ReportData) -> str:
+    """report() text: summary line (+ ` dfam=<nF>F/<nW>W` when findings not None), then one line per finding. Pure."""
+    if data.bbox_mm is None:
+        bbox, vol_str = "no-bodies", "0cm3"
+    else:
+        dx, dy, dz = data.bbox_mm
+        bbox = f"{dx:.1f}x{dy:.1f}x{dz:.1f}mm"
+        vol_str = f"{data.vol_cm3:.3f}cm3"
     line = (
-        f"{comp.name}: bodies={bodies} lumps={lumps} bbox={bbox} vol={vol_str} "
-        f"sketches={sk_constrained}/{sk_total} constrained design_timeline_unhealthy={unhealthy} "
-        f"timeline_unnamed={unnamed} timeline_numbered={numbered}"
+        f"{data.name}: bodies={data.bodies} lumps={data.lumps} bbox={bbox} vol={vol_str} "
+        f"sketches={data.sketches_constrained}/{data.sketches_total} constrained design_timeline_unhealthy={data.unhealthy} "
+        f"timeline_unnamed={data.unnamed} timeline_numbered={data.numbered}"
     )
     lines = [line]
-    if dfam:
-        found = [f for b in comp.bRepBodies for f in dfam_check(b)]
-        lines[0] = f"{line} {summarize_findings(found)}"
-        lines.extend(f.line() for f in found)
-    text = "\n".join(lines)
-    print(text)
-    return text
+    if data.findings is not None:
+        lines[0] = f"{line} {summarize_findings(data.findings)}"
+        lines.extend(f.line() for f in data.findings)
+    return "\n".join(lines)
 
 
 def world_bbox(occ: adsk.fusion.Occurrence) -> tuple[Xyz, Xyz]:
