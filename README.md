@@ -85,7 +85,7 @@ Check each field:
 - `bodies` and `lumps`: a body count that drops after a join or cut means geometry was lost.
 - `bbox` and `vol`: compare them with the numbers you expect from the parameters.
 - `sketches=N/M constrained`: every sketch should be fully constrained.
-- `design_timeline_unhealthy=0`: no feature has failed.
+- `design_timeline_unhealthy=0`: no feature has failed. Suppressed features are not counted there; they show as `suppressed=N`.
 - `timeline_unnamed=0`: must be zero. `timeline_numbered` lists `x_1..x_n` names, which often mark a pattern that should have been a seed. Justify it or replace it.
 - `dfam=<nF>F/<nW>W`, plus the `DFAM_FAIL` and `DFAM_WARN` lines. Each finding names its rule, as described below. A clean summary with a `DFAM_FAIL` line under it is not a pass.
 
@@ -122,7 +122,7 @@ Edges on the bed face need a real chamfer, about 1 mm (0.5 mm in tight spots). A
 
 ### 🌀 `warp_grooves`
 
-A bed face wider than 35 mm needs relief grooves, 0.8 × 0.3 mm on a 30 mm pitch, to reduce warping.
+A bed face wider than 35 mm needs relief grooves, 0.8 × 0.6 mm on a 30 mm pitch, to reduce warping.
 
 </td>
 </tr>
@@ -144,12 +144,14 @@ A vertical wall between 0.9 and 1.6 mm fails. That band is two 0.45 mm perimeter
 </tr>
 </table>
 
+`build_and_check(..., params=PARAMS, sweep=True)` sweeps every User Parameter that declares a range (4th `PARAMS` item, `min`/`max` or `values`). It sets each end value in the live Parameters dialog, then restores it, and reports `DFAM_FAIL param_sweep` when an edit breaks the model or changes nothing. The sweep is off by default (`sweep=False`, summary `sweep=off`): run it at the done-gate, not on every build. Stages print `TIME <stage> <s>`. The time budget (`budget_s`, default 30 s) is checked between stages; exceeded stages print `SKIP <stage> budget`, and the summary ends `budget=exceeded`. `param_lint` reports `BUILD_ONLY_PARAM` for parameters that Python reads at build time.
+
 A body can opt out of a rule with the `dfam_skip` attribute and a written reason, for example `teardrop:no horizontal hole here`. The skip is printed, so it stays visible.
 
 <div align="center">
 <img src="docs/img/underside.png" alt="Underside of the demo bracket: warp relief grooves and mounting holes" width="620">
 
-<sub>Underside: 0.8 x 0.3 mm warp relief grooves on a 30 mm pitch, and the four mounting holes.</sub>
+<sub>Underside: 0.8 x 0.6 mm warp relief grooves on a 30 mm pitch, and the four mounting holes.</sub>
 </div>
 
 The full rule table, with sources and the rules that are advisory only, is in [`docs/dfam_guidelines.md`](docs/dfam_guidelines.md).

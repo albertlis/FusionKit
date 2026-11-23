@@ -39,8 +39,8 @@ EXECUTE_TOOLS = frozenset(
     }
 )
 BUILD_CALL = "run_part("
-FAIL_TOKEN = re.compile(r"DFAM_FAIL\b")
-FAIL_LINE = re.compile(r"DFAM_FAIL[^\n\\\"]*")
+FAIL_TOKEN = re.compile(r"(?:DFAM|SKQ)_FAIL\b")  # SKQ_FAIL (sketch_quality) blocks like DFAM_FAIL
+FAIL_LINE = re.compile(r"(?:DFAM|SKQ)_FAIL[^\n\\\"]*")
 GREEN_TOKEN = re.compile(r"dfam=0F\b")
 PART_ARG = re.compile(r"run_part\(\s*[\"']?([^\"',)\s]+)")
 UNKNOWN_PART = "unknown"

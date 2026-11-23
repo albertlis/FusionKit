@@ -12,13 +12,14 @@ docs/gotchas.md gotchas encoded here
 import math
 import re
 from collections.abc import Callable, Iterable, Sequence
+from itertools import pairwise
 from typing import Literal, Protocol
 
 import adsk.core
 import adsk.fusion
 
 from fusion_kit._vec import _cross, _unit_strict
-from fusion_kit.dfam import BED_CHAMFER_ANGLE_DEG, BedDir, bed_axis, bed_wall_ratio, set_bed
+from fusion_kit.dfam import BED_CHAMFER_ANGLE_DEG, DFAM_GROUP, BedDir, bed_axis, set_bed
 from fusion_kit.enums import (
     IDENTICAL_PATTERN,
     OP_CUT,
@@ -125,7 +126,7 @@ def profiles(
 def extrude(
     comp: adsk.fusion.Component,
     prof: adsk.fusion.Profile | list[adsk.fusion.Profile],
-    distance: str | Ex,
+    distance: str | Ex | None,
     op: Op = "new",
     start_offset: str | Ex | None = None,
     symmetric: bool = False,
@@ -135,6 +136,11 @@ def extrude(
     taper: str | Ex | None = None,
     *,
     label: str,
+    to: adsk.core.Base | None = None,
+    to_offset: str | Ex | None = None,
+    through_all: bool = False,
+    two_sides: tuple[str | Ex, str | Ex] | None = None,
+    start_from: adsk.core.Base | None = None,
 ) -> adsk.fusion.ExtrudeFeature:
     """Extrude one profile along the sketch normal.
 
@@ -154,10 +160,33 @@ def extrude(
                    renaming it would clobber that body -> ValueError. 0 result bodies -> RuntimeError.
     taper        : one-side only: draft angle expr ("-46 deg"). Sign vs. shrink measured by caller.
     label        : snake_case timeline name of the FEATURE (name= names the body). Required.
+    to           : end at a construction plane / face / body (ToEntityExtentDefinition); to_offset = offset from it.
+    through_all  : cut/extrude through all (ThroughAllExtentDefinition).
+    two_sides    : (side1, side2) distances, one per direction from the profile plane (setTwoSidesExtent).
+    start_from   : start at a plane/face (FromEntityStartDefinition, zero offset). Exclusive with start_offset.
+                   to / through_all / two_sides replace distance (pass distance=None); they are mutually exclusive.
     """
     check_label(label)
-    if taper is not None and symmetric:
-        raise ValueError("extrude: taper only with one-side extent")
+    extent_kinds = [to is not None, through_all, two_sides is not None]
+    if sum(extent_kinds) > 1:
+        raise ValueError("extrude: to, through_all, two_sides are mutually exclusive")
+    special = any(extent_kinds)
+    if to_offset is not None and to is None:
+        raise ValueError("extrude: to_offset needs to=")
+    if special and distance is not None:
+        raise ValueError("extrude: distance given with to / through_all / two_sides; pass distance=None")
+    if not special and distance is None:
+        raise ValueError("extrude: distance required unless to / through_all / two_sides")
+    if special and symmetric:
+        raise ValueError("extrude: symmetric only with a distance extent")
+    if start_from is not None and start_offset is not None:
+        raise ValueError("extrude: start_from and start_offset are mutually exclusive")
+    if start_from is not None and symmetric:
+        raise ValueError("extrude: start_from and symmetric are mutually exclusive")
+    if two_sides is not None and (start_offset is not None or start_from is not None):
+        raise ValueError("extrude: two_sides starts on the profile plane; drop start_offset / start_from")
+    if taper is not None and (symmetric or special):
+        raise ValueError("extrude: taper only with one-side distance extent")
     if symmetric and start_offset is not None:
         raise ValueError("extrude: start_offset and symmetric are mutually exclusive")
     if bodies is not None and len(bodies) == 0:
@@ -171,12 +200,29 @@ def extrude(
     inp = comp.features.extrudeFeatures.createInput(coll, _OPS[op])
     if op != "new":
         inp.participantBodies = list(comp.bRepBodies) if bodies is None else bodies  # docs/gotchas.md: this component
-    if symmetric:
+    if symmetric and distance is not None:
         inp.setSymmetricExtent(_vi(distance), full_length)
+    elif two_sides is not None:
+        inp.setTwoSidesExtent(
+            adsk.fusion.DistanceExtentDefinition.create(_vi(two_sides[0])),
+            adsk.fusion.DistanceExtentDefinition.create(_vi(two_sides[1])),
+        )
     else:
         if start_offset is not None:
             inp.startExtent = adsk.fusion.OffsetStartDefinition.create(_vi(start_offset))
-        ext = adsk.fusion.DistanceExtentDefinition.create(_vi(distance))
+        if start_from is not None:
+            inp.startExtent = adsk.fusion.FromEntityStartDefinition.create(start_from, _vi("0 mm"))
+        if to is not None:
+            ext = (
+                adsk.fusion.ToEntityExtentDefinition.create(to, False)
+                if to_offset is None
+                else adsk.fusion.ToEntityExtentDefinition.create(to, False, _vi(to_offset))
+            )
+        elif through_all:
+            ext = adsk.fusion.ThroughAllExtentDefinition.create()
+        else:
+            assert distance is not None  # special is False here, so line 178 guarantees distance; narrows the type
+            ext = adsk.fusion.DistanceExtentDefinition.create(_vi(distance))
         if taper is None:
             inp.setOneSideExtent(ext, POSITIVE_EXTENT)
         else:
@@ -195,28 +241,100 @@ def revolve(
     prof: adsk.fusion.Profile,
     axis: adsk.fusion.ConstructionAxis | adsk.fusion.SketchLine,
     op: Op,
-    angle: str | Ex = "360 deg",
+    angle: str | Ex | None = None,
     *,
     bodies: list[adsk.fusion.BRepBody] | None = None,
+    symmetric: bool = False,
+    to: adsk.core.Base | None = None,
     label: str,
 ) -> adsk.fusion.RevolveFeature:
     """Revolve a profile around axis.
 
     op: "new" | "join" | "cut" | "intersect"
-    angle: Fusion expression or Ex (default "360 deg" = full revolution).
+    angle: Fusion expression or Ex. None = full revolution ("360 deg"). Exclusive with to=.
+    symmetric: angle split evenly on both sides of the profile plane (setAngleExtent(True, ...)).
+    to: end at a construction plane / face (setOneSideToExtent). Exclusive with angle and symmetric.
     bodies: non-new ops only, same as extrude: participants (None = all component bodies; [] -> ValueError).
     label: snake_case timeline name. participantBodies always set for non-new ops (docs/gotchas.md).
     """
     check_label(label)
     if bodies is not None and len(bodies) == 0:
         raise ValueError("revolve: bodies=[] is empty; pass None for all component bodies")
+    if to is not None and angle is not None:
+        raise ValueError("revolve: to and angle are mutually exclusive")
+    if to is not None and symmetric:
+        raise ValueError("revolve: to and symmetric are mutually exclusive")
     inp = comp.features.revolveFeatures.createInput(prof, axis, _OPS[op])
     if op != "new":
         inp.participantBodies = list(comp.bRepBodies) if bodies is None else bodies
-    inp.setAngleExtent(False, _vi(angle))
+    if to is not None:
+        inp.setOneSideToExtent(to)
+    else:
+        inp.setAngleExtent(symmetric, _vi("360 deg" if angle is None else angle))
     feat = comp.features.revolveFeatures.add(inp)
     set_label(feat, label)
     return feat
+
+
+def shell(
+    comp: adsk.fusion.Component,
+    faces: list[adsk.fusion.BRepFace],
+    thickness: str | Ex,
+    *,
+    label: str,
+) -> adsk.fusion.ShellFeature:
+    """Hollow the body: remove faces (open faces), wall thickness expression (inside).
+
+    faces: faces to REMOVE (ShellFeatureInput.inputEntities). [] -> ValueError.
+    """
+    check_label(label)
+    if not faces:
+        raise ValueError("shell: faces=[] is empty; pass the faces to open")
+    inp = comp.features.shellFeatures.createInput(collection(faces))
+    inp.insideThickness = _vi(thickness)
+    feat = comp.features.shellFeatures.add(inp)
+    set_label(feat, label)
+    return feat
+
+
+def plane_midplane(
+    comp: adsk.fusion.Component,
+    p1: adsk.core.Base,
+    p2: adsk.core.Base,
+    *,
+    label: str,
+) -> adsk.fusion.ConstructionPlane:
+    """Live construction plane midway between two planar faces / construction planes (setByTwoPlanes).
+
+    Co-planar inputs -> RuntimeError.
+    """
+    check_label(label)
+    inp = comp.constructionPlanes.createInput()
+    if not inp.setByTwoPlanes(p1, p2):
+        raise RuntimeError("plane_midplane: setByTwoPlanes failed (co-planar inputs?)")
+    plane = comp.constructionPlanes.add(inp)
+    set_label(plane, label)
+    return plane
+
+
+def axis_by_cylinder(
+    comp: adsk.fusion.Component,
+    face: adsk.fusion.BRepFace,
+    *,
+    label: str,
+) -> adsk.fusion.ConstructionAxis:
+    """Live construction axis coincident with a cylindrical / conical / toroidal face's axis.
+
+    Non-circular face -> RuntimeError. Rebuild: previous constructions with the same label are deleted first.
+    """
+    check_label(label)
+    _delete_previous(comp, label)
+    inp = comp.constructionAxes.createInput()
+    if not inp.setByCircularFace(face):
+        raise RuntimeError("axis_by_cylinder: face is not cylindrical / conical / toroidal")
+    axis = comp.constructionAxes.add(inp)
+    axis.name = check_label(label)  # set_label() types exclude ConstructionAxis; same as _axis_by_planes
+    return axis
 
 
 def _count(comp: adsk.fusion.Component, expr: str | Ex) -> float:
@@ -288,6 +406,7 @@ def pattern_rectangular(
     distance_type: adsk.fusion.PatternDistanceType = PATTERN_SPACING,
     *,
     compute: adsk.fusion.PatternComputeOptions = OPTIMIZED_PATTERN,
+    always: bool = False,
     label: str,
 ) -> adsk.fusion.RectangularPatternFeature | None:
     """Rectangular pattern of features/bodies along one direction.
@@ -299,12 +418,15 @@ def pattern_rectangular(
                    (Optimized drops or differs when instances end on different faces).
     qty evaluating < 2 -> returns None, no feature (Fusion rejects qty < 2). Param change 1 -> N later
     needs a rebuild (Fusion limit): the pattern does not exist to be updated.
+    always       : True -> skip the qty < 2 early return and always add the feature (qty may be 1). For a
+                   pattern that must exist so a later live qty change works (e.g. count 0 -> N). Fusion
+                   may still reject qty < 2 at add; that error propagates.
     Direction two is forced to qty 1 internally (Fusion default makes 3 copies per instance); one direction exposed.
     # ponytail: one direction only; add a direction_two arg when a mechanism needs a grid.
     label: snake_case timeline name (validated even when no feature is made).
     """
     check_label(label)
-    if _count(comp, qty) < 2:
+    if not always and _count(comp, qty) < 2:
         return None
     coll = collection(entities)
     rin = comp.features.rectangularPatternFeatures.createInput(coll, axis, _vi(qty), _vi(distance), distance_type)
@@ -724,6 +846,95 @@ def _in_face_dir(
     return None
 
 
+def _is_planar(face: adsk.fusion.BRepFace) -> bool:
+    geo = getattr(face, "geometry", None)
+    return geo is not None and adsk.core.Plane.cast(geo) is not None
+
+
+def _signed(d: tuple[float, float, float], opposed: bool) -> tuple[float, float, float]:
+    return (-d[0], -d[1], -d[2]) if opposed else d
+
+
+def _coedge_dir(face: adsk.fusion.BRepFace, edge: adsk.fusion.BRepEdge) -> tuple[float, float, float] | None:
+    """Unit edge direction in the coedge sense of face's loop; None if face has no coedge for edge.
+
+    BRep convention: face lies on the left of each coedge seen from its outward normal, so the in-face direction
+    away from the edge is n x t. Chord start->end gives the edge sense; BRepCoEdge.isOpposedToEdge flips it.
+    Lookup, documented API only (every collection read as count + item(i)):
+      1. edge.coEdges (BRepCoEdges) -> coedge.loop.face.tempId == face.tempId
+      2. face.loops (BRepLoops) -> loop.coEdges -> coedge.edge.tempId == edge.tempId
+    No match -> None -> caller falls back to the probe (counted in CONVEX_STATS["probe_fallback"]).
+    """
+    a = _xyz(edge.startVertex.geometry)
+    b = _xyz(edge.endVertex.geometry)
+    d = _unit_strict((b[0] - a[0], b[1] - a[1], b[2] - a[2]))
+    for i in range(edge.coEdges.count):
+        co = edge.coEdges.item(i)
+        if co.loop.face.tempId == face.tempId:
+            return _signed(d, co.isOpposedToEdge)
+    for i in range(face.loops.count):
+        lp = face.loops.item(i)
+        for j in range(lp.coEdges.count):
+            co = lp.coEdges.item(j)
+            if co.edge.tempId == edge.tempId:
+                return _signed(d, co.isOpposedToEdge)
+    return None
+
+
+def _topo_convex(
+    fa: adsk.fusion.BRepFace,
+    fb: adsk.fusion.BRepFace,
+    edge: adsk.fusion.BRepEdge,
+    na: tuple[float, float, float],
+    nb: tuple[float, float, float],
+) -> bool | None:
+    """Convex (True) / concave (False) from BRep topology, no containment probe. None = not applicable.
+
+    Needs both faces planar and a coedge of face A on edge. u_A = n_A x t_A = in-face direction from edge into A.
+    Convex iff A runs to the inner side of B's plane: n_B . u_A < 0. Concave: A runs outside B's half-space.
+    """
+    if not (_is_planar(fa) and _is_planar(fb)):
+        return None
+    t = _coedge_dir(fa, edge)
+    if t is None:
+        return None
+    u = _cross(na, t)
+    return nb[0] * u[0] + nb[1] * u[1] + nb[2] * u[2] < 0
+
+
+def _probe_convex(
+    body: adsk.fusion.BRepBody,
+    mid: adsk.core.Point3D,
+    na: tuple[float, float, float],
+    nb: tuple[float, float, float],
+    eps: float,
+) -> bool:
+    """Containment probe, convex test (eps in cm). Up to 5 pointContainment calls per edge.
+
+    t = unit(n_A x n_B); u_X = in-face direction from the edge into face X, sign by containment (M + eps*u_X ON body).
+    P = M + eps * unit(u_A + u_B): P INSIDE => convex (wedge between u_A and u_B is material).
+    Ambiguous (no sign ON, or u_A = -u_B) or POINT_ON => False (dropped).
+    NOT the bisector of outward normals: that probe is OUTSIDE for convex AND concave corners (L-corner test).
+    """
+    m = _xyz(mid)
+    t = _unit_strict(_cross(na, nb))
+    ua = _in_face_dir(body, m, na, t, eps)
+    ub = _in_face_dir(body, m, nb, t, eps)
+    if ua is None or ub is None:
+        return False
+    s = (ua[0] + ub[0], ua[1] + ub[1], ua[2] + ub[2])
+    if math.sqrt(s[0] ** 2 + s[1] ** 2 + s[2] ** 2) < 1e-6:
+        return False  # u_A = -u_B: straight through, no crease
+    su = _unit_strict(s)
+    probe = P3(m[0] + eps * su[0], m[1] + eps * su[1], m[2] + eps * su[2])
+    return body.pointContainment(probe) == POINT_INSIDE
+
+
+# Process-wide counters for convex_edges, read live by the manager: topo = decided from coedge topology,
+# probe_fallback = containment probe used (non-planar pair or no matching coedge). Reset by assignment if needed.
+CONVEX_STATS: dict[str, int] = {"topo": 0, "probe_fallback": 0}
+
+
 def convex_edges(
     body: adsk.fusion.BRepBody,
     edges: Iterable[adsk.fusion.BRepEdge],
@@ -731,15 +942,12 @@ def convex_edges(
 ) -> list[adsk.fusion.BRepEdge]:
     """Edges of body that are convex creases (interior dihedral < 180 deg).
 
-    Only 2-face edges with non-parallel normals are considered; others are dropped. Per edge, at midpoint M:
-      t   = unit(n_A x n_B): edge direction.
-      u_X = unit(n_X x t) in-face direction from the edge into face X; sign by containment
-            (M + eps*u_X ON body => into X). Neither sign ON => edge dropped (ambiguous).
-      P   = M + eps * unit(u_A + u_B), eps = probe_mm (mm -> cm).
-      P INSIDE body => convex (the wedge between u_A and u_B is material). P OUTSIDE => concave. POINT_ON => dropped.
+    Only 2-face edges with non-parallel normals are considered; others are dropped. Per edge:
+      - both faces planar and face A has a coedge on the edge: decided from topology (_topo_convex), zero probes.
+        Convex iff n_B . (n_A x t_A) < 0, t_A = coedge direction of A. Hand-checked on unit cube / L prism.
+      - otherwise containment probe (_probe_convex, probe_mm mm -> cm). Ambiguous probe => dropped.
     No pointOnFace used (it may sit beyond the edge line on a non-convex face). Raises ValueError if face_normal
     gets no normal at M.
-    NOT the bisector of outward normals: that probe is OUTSIDE for convex AND concave corners (L-corner test).
     """
     eps = probe_mm / 10  # mm -> cm
     out: list[adsk.fusion.BRepEdge] = []
@@ -749,23 +957,18 @@ def convex_edges(
             continue
         fa, fb = faces
         mid = e.pointOnEdge
-        m = _xyz(mid)
         na = _unit_strict(_xyz(face_normal(fa, mid)))
         nb = _unit_strict(_xyz(face_normal(fb, mid)))
         cross = _cross(na, nb)
         if math.sqrt(cross[0] ** 2 + cross[1] ** 2 + cross[2] ** 2) < 1e-6:
             continue  # parallel normals: tangent (flat) or folded-back edge, not a convex crease
-        t = _unit_strict(cross)
-        ua = _in_face_dir(body, m, na, t, eps)
-        ub = _in_face_dir(body, m, nb, t, eps)
-        if ua is None or ub is None:
-            continue  # no containment sign for a face: ambiguous, drop
-        s = (ua[0] + ub[0], ua[1] + ub[1], ua[2] + ub[2])
-        if math.sqrt(s[0] ** 2 + s[1] ** 2 + s[2] ** 2) < 1e-6:
-            continue  # u_A = -u_B: straight through, no crease
-        su = _unit_strict(s)
-        probe = P3(m[0] + eps * su[0], m[1] + eps * su[1], m[2] + eps * su[2])
-        if body.pointContainment(probe) == POINT_INSIDE:
+        convex = _topo_convex(fa, fb, e, na, nb)
+        if convex is None:
+            CONVEX_STATS["probe_fallback"] += 1
+            convex = _probe_convex(body, mid, na, nb, eps)
+        else:
+            CONVEX_STATS["topo"] += 1
+        if convex:
             out.append(e)
     return out
 
@@ -1102,7 +1305,7 @@ def bed_chamfer(
 
     bed = bed face direction ('-z' default = min-Z face; '+x' = X-max face). Stored on body as dfam/bed (set_bed)
     so report() checks the same bed. Chamfer face |n| is read on the bed axis.
-    distance = 90-deg-equivalent WALL leg (mm expr or Ex): bed footprint = distance / tan(angle_deg) for every phi; wall leg = distance * bed_wall_ratio(90, angle_deg) / bed_wall_ratio(phi, angle_deg). phi = the
+    distance = 90-deg-equivalent WALL leg (mm expr or Ex): bed footprint = distance / tan(angle_deg) for every phi; wall leg = distance * bed_wall_ratio(90, angle_deg) / bed_wall_ratio(phi, angle_deg), written as expression text = distance / (sin(phi) + cos(phi) * tan(angle_deg)). Both legs are timeline expressions: angle_deg is in the text, phi is the measured dihedral literal. phi = the
     edge's interior dihedral (90 square corner, 105 for a 15 deg dovetail wall). Edges are grouped by phi: one two-distance
     edge set per group, all in ONE feature.
     angle_deg = chamfer FACE angle FROM HORIZONTAL, must be in (45, 90) exclusive, else ValueError.
@@ -1136,10 +1339,13 @@ def bed_chamfer(
         for e in edges:
             groups.setdefault(round(_bed_dihedral_deg(e, bed), 1), []).append(e)
         ci = comp.features.chamferFeatures.createInput2()
-        ratio90 = bed_wall_ratio(90.0, angle_deg)
+        # Expression text, not a Python float: the angle stays visible in the timeline.
+        # bed leg = distance * cot(angle) = distance * tan(90 - angle), same for every phi (90-deg footprint rule).
+        bed_leg = f"({side}) * tan({90.0 - angle_deg!r} deg)"
         for phi, grp in sorted(groups.items()):
-            bed_leg = f"({side}) * {ratio90!r}"  # bed footprint = 90-deg footprint of distance, any phi
-            wall_leg = f"({side}) * {ratio90 / bed_wall_ratio(phi, angle_deg)!r}"
+            # wall leg = distance * cot(angle) / bed_wall_ratio(phi) = distance / (sin(phi) + cos(phi) * tan(angle)).
+            # phi stays a literal: it is the measured dihedral of this edge group, not a user parameter.
+            wall_leg = f"({side}) / (sin({phi!r} deg) + cos({phi!r} deg) * tan({angle_deg!r} deg))"
             ci.chamferEdgeSets.addTwoDistancesChamferEdgeSet(collection(grp), _vi(bed_leg), _vi(wall_leg), flip, False)
         feat = comp.features.chamferFeatures.add(ci)
         nz = [abs(_xyz(f.evaluator.getNormalAtPoint(f.pointOnFace)[1])[axis]) for f in feat.faces]
@@ -1238,7 +1444,8 @@ def select_edges(
     return out
 
 
-_GROOVE_MIN_SPAN_MM = 35.0  # spans <= this get no relief grooves
+_GROOVE_MIN_SPAN_MM = 35.0  # spans <= this get no relief grooves; also max segment (edge to groove, groove to groove)
+GROOVE_EDGE_MIN_MM = 3.0  # outermost groove centre to bed edge (clears a 1 mm bed chamfer and the groove width)
 _GROOVE_OVERRUN_MM = 1.0  # seed rect runs this far past the body so the cut goes through
 
 
@@ -1247,15 +1454,37 @@ def _mm(v: float) -> str:
     return f"{v:.6f} mm"
 
 
-def groove_positions(length_mm: float, pitch_mm: float = 30.0) -> list[float]:
-    """Groove centres along one span, symmetric about 0, spacing pitch_mm.
+def _spaced_centres(n: int, spacing_mm: float) -> list[float]:
+    """n centres at spacing_mm, symmetric about 0."""
+    return [(i - (n - 1) / 2) * spacing_mm for i in range(n)]
 
-    Count = floor(length / pitch), at least 1; span <= 35 mm -> []. Caller offsets by the body centre.
+
+def _grooves_ok(length_mm: float, centres: list[float]) -> bool:
+    """Outer segment (bed edge to outermost centre) >= GROOVE_EDGE_MIN_MM; every segment < _GROOVE_MIN_SPAN_MM."""
+    edges = [-length_mm / 2, *centres, length_mm / 2]
+    segs = [b - a for a, b in pairwise(edges)]
+    return (
+        segs[0] >= GROOVE_EDGE_MIN_MM and segs[-1] >= GROOVE_EDGE_MIN_MM and all(s < _GROOVE_MIN_SPAN_MM for s in segs)
+    )
+
+
+def groove_positions(length_mm: float, pitch_mm: float = 30.0) -> list[float]:
+    """Groove centres along one span, symmetric about 0.
+
+    span <= 35 mm -> []. Above 35 mm: first try pitch spacing with n = max(2, floor(length / pitch)) centres
+    (dfam _warp_family needs >= 2 parallel lines, so never 1). Kept only if the outer centre is >= GROOVE_EDGE_MIN_MM
+    (3 mm) from its bed edge and every segment (edge to groove, groove to groove) is < 35 mm. Otherwise (pitch pair
+    too wide for the span, or pitch > 35 mm) use n = max(2, floor(length / 35)) centres at equal segments
+    length / (n + 1): every segment < 35 mm and outer >= 3 mm for any span > 35 mm. Caller offsets by the body
+    centre; spacing = centres[1] - centres[0].
     """
     if length_mm <= _GROOVE_MIN_SPAN_MM:
         return []
-    n = max(1, math.floor(length_mm / pitch_mm))
-    return [(i - (n - 1) / 2) * pitch_mm for i in range(n)]
+    centres = _spaced_centres(max(2, math.floor(length_mm / pitch_mm)), pitch_mm)
+    if _grooves_ok(length_mm, centres):
+        return centres
+    n = max(2, math.floor(length_mm / _GROOVE_MIN_SPAN_MM))
+    return _spaced_centres(n, length_mm / (n + 1))
 
 
 def _seed_rect(
@@ -1267,6 +1496,7 @@ def _seed_rect(
     *,
     bed_dir: BedDir = "-z",
     bed_mm: float = 0.0,
+    exprs: dict[int, tuple[str, str]] | None = None,
 ) -> None:
     """Seed groove rectangle on the bed plane (mm). (x0, x1) / (y0, y1): MODEL coords along the bed's two in-plane
     axes, lower axis index first ('-z' -> x, y; '+x' -> y, z). bed_mm = bed plane coordinate on its normal axis.
@@ -1275,6 +1505,8 @@ def _seed_rect(
     yZ sketch x = -Z, xZ sketch y = -Z, xY as model). Both corners dimensioned from the sketch origin with
     unsigned dims: rect_xy() dims corner-to-corner and the solver's sign pick flipped the far edge (live X seed,
     centre 14.2 instead of 15). rect() corners stay jittered; the solver snaps them.
+    exprs: optional {model axis index: (lo corner expr, hi corner expr)} replacing that axis' dim literal, e.g.
+    {0: ("20 mm - (warp_groove_width) / 2", "20 mm + (warp_groove_width) / 2")} makes the seed width a parameter.
     """
     a, _ = bed_axis(bed_dir)
     pa, pb = [k for k in range(3) if k != a]
@@ -1283,13 +1515,31 @@ def _seed_rect(
     c0[a] = c1[a] = bed_mm
     c0[pa], c0[pb] = x0, y0
     c1[pa], c1[pb] = x1, y1
+    ex = exprs or {}
+
+    def _pt(c: list[float], corner: int) -> tuple[str, str, str]:
+        x = ex[0][corner] if 0 in ex else _mm(c[0])
+        y = ex[1][corner] if 1 in ex else _mm(c[1])
+        z = ex[2][corner] if 2 in ex else _mm(c[2])
+        return (x, y, z)
+
     bottom, _, top, _ = rect(s, (c0[0], c0[1], c0[2]), (c1[0], c1[1], c1[2]))
-    fix_point(s, bottom.startSketchPoint, (_mm(c0[0]), _mm(c0[1]), _mm(c0[2])))
-    fix_point(s, top.startSketchPoint, (_mm(c1[0]), _mm(c1[1]), _mm(c1[2])))
+    fix_point(s, bottom.startSketchPoint, _pt(c0, 0))
+    fix_point(s, top.startSketchPoint, _pt(c1, 1))
 
 
 # Model axes by letter, typed for axis_plane / axis_*_through.
 _AXES: tuple[Literal["x", "y", "z"], ...] = ("x", "y", "z")
+
+# Attribute (group DFAM_GROUP) on the sketch, seed cut and pattern of each warp groove family. param_sweep reads it
+# to suppress the grooves on probes of params that no groove expression refers to.
+WARP_GROOVE_ATTR = "warp_groove"
+
+
+def _tag_warp_groove(ent: adsk.fusion.Sketch | adsk.fusion.Feature) -> None:
+    attrs = getattr(ent, "attributes", None)  # offline fakes carry no attributes; live Sketch / Feature always do
+    if attrs is not None:
+        attrs.add(DFAM_GROUP, WARP_GROOVE_ATTR, "1")
 
 
 def _relief_family(
@@ -1305,11 +1555,26 @@ def _relief_family(
     bed_dir: BedDir = "-z",
     depth_sign: int = 1,
     bed_mm: float = 0.0,
+    width_expr: str | None = None,
+    depth_expr: str | None = None,
+    length_expr: str | None = None,
+    margin_mm: float = 0.0,
+    margin_expr: str | None = None,
+    target_pitch_expr: str | None = None,
+    run_expr: tuple[str, str] | None = None,
+    along_lo_expr: str | None = None,
 ) -> list[adsk.fusion.Feature]:
     """Grooves spaced along `along` (an in-plane axis of bed_dir), each through the full span of the other in-plane
     axis: seed cut + rectangular pattern. Seed rect in model coords (_seed_rect).
     depth_sign: +1 if the extrude of depth_mm goes into the body, -1 if the plane normal points out of it.
-    bed_mm: bed plane coordinate (mm) on the bed normal axis."""
+    bed_mm: bed plane coordinate (mm) on the bed normal axis.
+    width_expr / depth_expr: see warp_relief_grooves. None = literal mm from width_mm / depth_mm.
+    length_expr set -> live mode: count, spacing and seed centre are Fusion expressions of length_expr (body extent
+    along `along`), margin_expr (bed edge -> first and last centre; margin_mm = its value) and target_pitch_expr
+    (pitch_mm = its value). Always builds (no 35 mm gate). run_expr = (lo, hi) Fusion expressions of the run-axis
+    (other in-plane axis) body extent: required in live mode.
+    along_lo_expr: Fusion expr of the low edge of `along` (live only): seed centre = (along_lo_expr) + margin_expr.
+    None = literal low edge."""
     a, _ = bed_axis(bed_dir)
     i = "xyz".index(along)  # spacing axis
     if i == a:
@@ -1318,33 +1583,82 @@ def _relief_family(
     bb = body.boundingBox
     lo_i, hi_i = getattr(bb.minPoint, _AXES[i]) * 10, getattr(bb.maxPoint, _AXES[i]) * 10  # cm -> mm
     lo_j, hi_j = getattr(bb.minPoint, _AXES[j]) * 10, getattr(bb.maxPoint, _AXES[j]) * 10
-    centres = groove_positions(hi_i - lo_i, pitch_mm)
-    if not centres:
-        return []
-    first = (lo_i + hi_i) / 2 + centres[0]  # seed = first centre; pattern adds +pitch per instance
+    live = length_expr is not None
+    if live:
+        if margin_mm < GROOVE_EDGE_MIN_MM:
+            raise ValueError(f"groove margin {margin_mm} mm < GROOVE_EDGE_MIN_MM {GROOVE_EDGE_MIN_MM}")
+        if run_expr is None:
+            raise ValueError(f"live groove family {along!r}: run_expr (run-axis extent) required, no literal fallback")
+        free = hi_i - lo_i - 2 * margin_mm
+        if free <= 0:
+            raise ValueError(f"live groove family {along!r}: span {hi_i - lo_i} mm < 2 x margin {margin_mm} mm")
+        n_py = math.floor(free / pitch_mm) + 2  # same count as qty_text at the current length
+        spacing = free / (n_py - 1)
+        first = lo_i + margin_mm  # seed = first centre, margin_mm from the bed edge (expression below)
+        # floor(..) + 2, not max(2; floor(..) + 1): Fusion rejects max()/min() in User Parameter expressions (gotchas).
+        # +2 gives count >= 2 for any free >= 0 and spacing <= pitch (dfam: every segment < 35 mm).
+        qty_text = f"floor(({length_expr} - 2 * ({margin_expr})) / ({target_pitch_expr})) + 2"
+        step_text = f"({length_expr} - 2 * ({margin_expr})) / (({qty_text}) - 1)"
+        lo_text = _mm(lo_i) if along_lo_expr is None else f"({along_lo_expr})"
+        centre_expr: str | None = f"({lo_text} + ({margin_expr}))"
+    else:
+        centres = groove_positions(hi_i - lo_i, pitch_mm)
+        if not centres:
+            return []
+        spacing = centres[1] - centres[0]  # pitch_mm, or equal segments when pitch does not fit (groove_positions)
+        first = (lo_i + hi_i) / 2 + centres[0]  # seed = first centre; pattern adds +spacing per instance
+        qty_text, step_text = str(len(centres)), _mm(spacing)
+        centre_expr = None
     u0, u1 = first - width_mm / 2, first + width_mm / 2
     v0, v1 = lo_j - _GROOVE_OVERRUN_MM, hi_j + _GROOVE_OVERRUN_MM
     iv = {i: (u0, u1), j: (v0, v1)}  # model intervals per in-plane axis
     pa, pb = [k for k in range(3) if k != a]  # lower in-plane axis first, as _seed_rect expects
     (x0, x1), (y0, y1) = iv[pa], iv[pb]
+    # width_expr: the seed's two width-axis corners become centre -/+ width/2 expressions (centre stays literal).
+    # live: centre is itself an expression (bed edge + margin_expr), so the seed moves with the parameters.
+    # run_expr (live only): run-axis corners = body extent -/+ overrun, as expressions (no literal extent).
+    seed_exprs: dict[int, tuple[str, str]] = {}
+    if live:
+        w_half = f"({width_expr}) / 2" if width_expr is not None else _mm(width_mm / 2)
+        seed_exprs[i] = (f"{centre_expr} - {w_half}", f"{centre_expr} + {w_half}")
+    elif width_expr is not None:
+        seed_exprs[i] = (f"{_mm(first)} - ({width_expr}) / 2", f"{_mm(first)} + ({width_expr}) / 2")
+    if run_expr is not None:
+        lo_e, hi_e = run_expr
+        seed_exprs[j] = (f"({lo_e}) - {_mm(_GROOVE_OVERRUN_MM)}", f"({hi_e}) + {_mm(_GROOVE_OVERRUN_MM)}")
     s = new_sketch(comp, bed, label=f"{label}_{along}_sketch")
-    _seed_rect(s, x0, y0, x1, y1, bed_dir=bed_dir, bed_mm=bed_mm)
-    seed = extrude(comp, profile(s), _mm(depth_sign * depth_mm), op="cut", bodies=[body], label=f"{label}_{along}_seed")
+    _tag_warp_groove(s)
+    _seed_rect(s, x0, y0, x1, y1, bed_dir=bed_dir, bed_mm=bed_mm, exprs=seed_exprs or None)
+    depth = (
+        _mm(depth_sign * depth_mm)
+        if depth_expr is None
+        else (f"({depth_expr})" if depth_sign > 0 else f"-({depth_expr})")
+    )
+    seed = extrude(comp, profile(s), depth, op="cut", bodies=[body], label=f"{label}_{along}_seed")
+    _tag_warp_groove(seed)
+    # Model origin axis of `along` (points +): no construction axis/planes per family, copies step +spacing.
+    # Seed stays at lowest centre.
     if along == "x":
-        axis = axis_x_through(comp, y="0 mm", z="0 mm", label=f"{label}_x_axis")
+        axis = comp.xConstructionAxis
     elif along == "y":
-        axis = axis_y_through(comp, x="0 mm", z="0 mm", label=f"{label}_y_axis")
+        axis = comp.yConstructionAxis
     else:
-        axis = axis_z_through(comp, x="0 mm", y="0 mm", label=f"{label}_z_axis")
-    # Pattern steps +pitch along the built axis. Fusion picks its direction (measured -Y on axis_y_through):
-    # negative along the spacing axis -> negate pitch, else copies land outside the body. Seed stays at lowest centre.
-    step = -pitch_mm if _xyz(axis.geometry.direction)[i] < 0 else pitch_mm
+        axis = comp.zConstructionAxis
     out: list[adsk.fusion.Feature] = [seed]
     # IDENTICAL, not default OPTIMIZED: with the other family present, OPTIMIZED truncated the body (live: vol 43.7 -> 20.5).
+    # live: always=True (skips the Python-side qty < 2 check; qty_text is >= 2 by construction).
     pat = pattern_rectangular(
-        comp, [seed], axis, str(len(centres)), _mm(step), compute=IDENTICAL_PATTERN, label=f"{label}_{along}_pattern"
+        comp,
+        [seed],
+        axis,
+        qty_text,
+        step_text,
+        compute=IDENTICAL_PATTERN,
+        always=live,
+        label=f"{label}_{along}_pattern",
     )
     if pat is not None:
+        _tag_warp_groove(pat)
         out.append(pat)
     return out
 
@@ -1355,50 +1669,101 @@ def warp_relief_grooves(
     *,
     label: str,
     width_mm: float = 0.8,
-    depth_mm: float = 0.3,
+    depth_mm: float = 0.6,
     pitch_mm: float = 30.0,
     bed: BedDir = "-z",
+    width_expr: str | None = None,
+    depth_expr: str | None = None,
+    length_exprs: dict[str, str] | None = None,
+    margin_mm: float = 0.0,
+    margin_expr: str | None = None,
+    target_pitch_expr: str | None = None,
+    run_exprs: dict[str, tuple[str, str]] | None = None,
 ) -> list[adsk.fusion.Feature]:
     """Anti-warp relief grooves cut into body from its print bed face (bed = BedDir; '-z' default = min Z of bbox).
 
     Two families = the two axes in the bed plane, full span. Per family: one seed groove (width_mm wide, depth_mm deep)
     + pattern_rectangular over groove_positions of that family's span, spacing pitch_mm. Stores bed on body (set_bed).
     Labels: <label>_bed, <label>_{a,b}_{sketch,seed,pattern}, <label>_{a,b}_axis (a, b = the in-plane axes).
+
+    width_expr / depth_expr: optional timeline expression strings, normally User Parameter names
+    (e.g. "warp_groove_width"). When given, they replace the literal numbers in the timeline: sketch width dim
+    (centre -/+ (width_expr)/2), seed cut depth. None = literal width_mm / depth_mm.
+    Pass the numeric values in width_mm/depth_mm too: they drive the geometry in Python.
+    Live mode (length_exprs): {family axis letter: Fusion expression of that family's body extent}, e.g.
+    {"z": "bracket_length"}. Families in the map get count, spacing and seed centre as expressions:
+    count = floor((L - 2 * margin_expr) / target_pitch_expr) + 2, spacing = (L - 2 * margin_expr) / (count - 1),
+    seed centre = bed edge + margin_expr. Needs margin_expr, target_pitch_expr; margin_mm / pitch_mm = their values
+    (>= GROOVE_EDGE_MIN_MM margin). Live families always build (no 35 mm gate). run_exprs = {run axis letter:
+    (lo_expr, hi_expr)}: Fusion expressions of the body extent along the run axis (the other in-plane axis); seed
+    run ends = (lo_expr) - 1.000000 mm / (hi_expr) + 1.000000 mm. Required for every live family's run axis, extra
+    keys raise ValueError, no literal fallback. Families not in the map keep literal positions (35 mm gate, build-time).
+    If run_exprs also names a live family's own spacing axis (other family live), that family's seed centre =
+    (lo_expr) + margin_expr; else literal low edge.
+    Edits to the expression params update grooves and seed run ends with no re-run; bed choice and literal family
+    presence stay build-time. No bed plane / sketch is created when no family builds.
+    Literal mode (length_exprs None): pitch_mm stays literal by design: positions, qty, spacing are computed at
+    build -> re-run script after changing pitch or part size.
     """
     check_label(label)
     a, sgn = bed_axis(bed)
-    corner = body.boundingBox.minPoint if sgn < 0 else body.boundingBox.maxPoint
+    fams: list[Literal["x", "y", "z"]] = [ax for k, ax in enumerate(_AXES) if k != a]
+    lens = length_exprs or {}
+    runs = run_exprs or {}
+    if length_exprs is not None:
+        bad = [k for k in length_exprs if k not in fams]
+        if bad:
+            raise ValueError(f"length_exprs keys {bad}: not in-plane axes of bed {bed!r} {fams}")
+        if margin_expr is None or target_pitch_expr is None:
+            raise ValueError("length_exprs needs margin_expr and target_pitch_expr")
+    live = [ax for ax in fams if lens.get(ax) is not None]
+    # a family's seed runs along the OTHER in-plane axis: that is the axis run_exprs must name for a live family
+    run_of = {ax: _AXES[3 - a - "xyz".index(ax)] for ax in fams}
+    need = sorted({run_of[ax] for ax in live})
+    missing = [ax for ax in need if ax not in runs]
+    if missing:
+        raise ValueError(f"live groove families {live}: run_exprs missing run axis {missing} (no literal fallback)")
+    extra = sorted(k for k in runs if k not in need)
+    if extra:
+        raise ValueError(f"run_exprs keys {extra}: run axis of no live groove family {live}")
+    bb = body.boundingBox
+    # no family builds -> no bed plane / sketch (else an orphan plane). Literal test = same span as _relief_family.
+    built = [
+        ax
+        for ax in fams
+        if ax in live or bool(groove_positions(getattr(bb.maxPoint, ax) * 10 - getattr(bb.minPoint, ax) * 10, pitch_mm))
+    ]
+    set_bed(body, bed)
+    if not built:
+        return []
+    corner = bb.minPoint if sgn < 0 else bb.maxPoint
     bed_mm = getattr(corner, _AXES[a]) * 10  # cm -> mm
     plane = axis_plane(comp, _AXES[a], _mm(bed_mm), bed_mm, label=f"{label}_bed")
     # cut runs from the bed INTO the body = -sign * e_a; the plane normal sign comes from the base plane
     depth_sign = 1 if getattr(plane.geometry.normal, _AXES[a]) * -sgn > 0 else -1
-    set_bed(body, bed)
-    fams: list[Literal["x", "y", "z"]] = [ax for k, ax in enumerate(_AXES) if k != a]
-    return [
-        *_relief_family(
-            comp,
-            plane,
-            body,
-            fams[0],
-            label=label,
-            width_mm=width_mm,
-            depth_mm=depth_mm,
-            pitch_mm=pitch_mm,
-            bed_dir=bed,
-            depth_sign=depth_sign,
-            bed_mm=bed_mm,
-        ),
-        *_relief_family(
-            comp,
-            plane,
-            body,
-            fams[1],
-            label=label,
-            width_mm=width_mm,
-            depth_mm=depth_mm,
-            pitch_mm=pitch_mm,
-            bed_dir=bed,
-            depth_sign=depth_sign,
-            bed_mm=bed_mm,
-        ),
-    ]
+    out: list[adsk.fusion.Feature] = []
+    for ax in fams:
+        out.extend(
+            _relief_family(
+                comp,
+                plane,
+                body,
+                ax,
+                label=label,
+                width_mm=width_mm,
+                depth_mm=depth_mm,
+                pitch_mm=pitch_mm,
+                bed_dir=bed,
+                depth_sign=depth_sign,
+                bed_mm=bed_mm,
+                width_expr=width_expr,
+                depth_expr=depth_expr,
+                length_expr=lens.get(ax),
+                margin_mm=margin_mm,
+                margin_expr=margin_expr,
+                target_pitch_expr=target_pitch_expr,
+                run_expr=runs.get(run_of[ax]),
+                along_lo_expr=runs[ax][0] if ax in runs else None,
+            )
+        )
+    return out

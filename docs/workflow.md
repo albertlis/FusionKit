@@ -17,10 +17,11 @@ The main session runs on Opus. It plans, writes briefs, reads results and makes 
 | `TestRunner` | Haiku | Runs the test or type-check command and reports tersely |
 | `Adversary` | Opus | Attacks a finished chunk of work. Read-only |
 | `Structure` | Opus | Owns `CONVENTIONS.md`. Writes nothing else |
+| `SketchReviewer` | Opus | Reads sketches and the features that use them; names constraint and extent fixes. Read-only |
 | `CadSimplifier` | Opus | Reads a Fusion timeline and names steps that can go. Read-only |
 | `Senior` | Opus | Writer of last resort. Only after two failed `SimpleTask` attempts |
 
-The plugin ships `CadSimplifier` (in [agents/CadSimplifier.md](../agents/CadSimplifier.md)). The other roles are our own agent files. Example copies are in [examples/claude-config/agents/](../examples/claude-config/agents/).
+The plugin ships `SketchReviewer` (in [agents/SketchReviewer.md](../agents/SketchReviewer.md)) and `CadSimplifier` (in [agents/CadSimplifier.md](../agents/CadSimplifier.md)). The other roles are our own agent files. Example copies are in [examples/claude-config/agents/](../examples/claude-config/agents/).
 
 Why many small workers: a worker with a sharp brief succeeds more often than one big run, and a small failed task costs little. When a worker fails, we narrow the brief and retry before we escalate. Our rule: ten small tasks before one big one.
 
@@ -78,12 +79,15 @@ For a CAD change the loop is the same every time:
 
 1. Build in steps. One `execute` per step, timed with `time.perf_counter()`. A timed-out call keeps Fusion busy, so the next call times out too. Do not retry. Wait until Fusion is idle, then inspect the document.
 2. Read `report()`. It prints bodies, bounding box, volume, constrained sketches, `timeline_unnamed` (must be 0), `timeline_numbered`, the DfAM counts, and one line per `DFAM_FAIL` or `DFAM_WARN`. Read the numbers, not only the colour of the output.
-3. Run `printability.check_body(body, up_rot, min_angle_deg=45)` in print orientation. Check the seed occurrence of each component. A rotated twin of the same component gives a false overhang FAIL.
-4. Run `CadSimplifier` on the finished part. It reads the timeline (read-only) and returns a ranked recipe. Hand the recipe to a worker, rebuild, re-measure.
-5. Run `Adversary` on the finished chunk, after the checks are green.
-6. Fix, re-run live, re-measure. Quote numbers from the last run only.
-7. Take one screenshot at the end. `save_screenshot` writes a 600x400 PNG with +Z up.
-8. Ask for a photo or screenshot review against the physical fit. Done means it fits, not that the checks are green.
+3. Run `SketchReviewer` on the finished part, after `report()` is green. It reads the sketches and the features that use them (read-only) and returns ranked constraint and extent fixes. Rules: [sketch_guidelines.md](sketch_guidelines.md).
+4. Run `printability.check_body(body, up_rot, min_angle_deg=45)` in print orientation. Check the seed occurrence of each component. A rotated twin of the same component gives a false overhang FAIL.
+5. Run `CadSimplifier` on the finished part. It reads the timeline (read-only) and returns a ranked recipe. Hand the recipe to a worker, rebuild, re-measure.
+6. Run `Adversary` on the finished chunk, after the checks are green.
+7. Fix, re-run live, re-measure. Quote numbers from the last run only.
+8. Take one screenshot at the end. `save_screenshot` writes a 600x400 PNG with +Z up.
+9. Ask for a photo or screenshot review against the physical fit. Done means it fits, not that the checks are green.
+
+Done gate: `build_and_check(..., params=PARAMS, sweep=True)` once, when the part is otherwise done. Expect `sweep=<N>p/0F`. Per build the sweep stays off (`sweep=off`), so iteration is fast. `TIME <stage> <s>` lines show the cost of each stage. `SKIP <stage> budget` or `budget=exceeded` means that stage did not run: it is not a pass. Raise `budget_s` or narrow `checks`, then re-run.
 
 Green is not proof. Lint and type checks say the code is well formed. The report says the model has the numbers we expected. Only a run that exercises the change, or a measurement of the real model, says it works. We quote that output in the reply. If we cannot run it, we say so.
 

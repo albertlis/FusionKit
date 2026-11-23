@@ -317,16 +317,72 @@ def _sketch_dims(s: adsk.fusion.Sketch, p: Pt) -> tuple[str | None, str | None]:
     return out[0], out[1]
 
 
-def fix_point(s: adsk.fusion.Sketch, sp: adsk.fusion.SketchPoint, p: Pt) -> None:
+def _sign(v: float) -> int:
+    return (v > 0) - (v < 0)
+
+
+def _flip_coord(cur: float, t: float) -> float | None:
+    """New sketch coord for one axis, or None = leave it. Only a point on the WRONG side of the axis moves.
+
+    |t| <= 1e-6 (target on the axis) or same sign as target -> None. Else t + RECT_JITTER*sign(t): on the target's
+    side, just off the exact value (exact shared coords -> inferred constraints, VCS_SKETCH_OVER_CONSTRAINTS).
+    """
+    if abs(t) <= 1e-6 or _sign(cur) == _sign(t):
+        return None
+    return t + RECT_JITTER * _sign(t)
+
+
+def _anchor_axis(s: adsk.fusion.Sketch, p: adsk.fusion.SketchPoint, k: int, expr: str | None) -> None:
+    """One sketch axis of anchor(): k=0 x (horizontal dim), k=1 y (vertical dim). expr None = p on that origin line."""
+    o = s.originPoint
+    gc = s.geometricConstraints
+    if k == 0:
+        if expr is None:
+            gc.addVerticalPoints(o, p)
+        else:
+            dim(s, o, p, expr, HORIZONTAL_DIM)
+    elif expr is None:
+        gc.addHorizontalPoints(o, p)
+    else:
+        dim(s, o, p, expr, VERTICAL_DIM)
+
+
+def fix_point(
+    s: adsk.fusion.Sketch,
+    sp: adsk.fusion.SketchPoint,
+    p: Pt,
+    *,
+    skip_axes: frozenset[int] = frozenset(),
+) -> None:
     """Dimension sp from the sketch origin to model point p (expressions).
 
-    Dims are unsigned: the side comes from sp's current position, so sp must already sit at p's
-    evaluated position (e.g. circle(s, *map(mm, p), ...), not circle(s, 0, 0, ...)).
+    skip_axes: sketch axes (0 = x, 1 = y) given no dim and no origin-line constraint here; the linked vertex that
+    owns the axis (param_poly hv=True) dims it. Empty = anchor() as before.
+
+    Dims are unsigned: the side comes from sp's current position. So before any dim or constraint, each sketch
+    axis where sp sits on the wrong side (sign(current) != sign(target), target not 0) is moved to target +
+    RECT_JITTER on the target's side; an earlier solve may have dragged it across an axis. Other axes and
+    same-side points are not moved; when nothing flips no move() call is made. move() refusing
+    (constraint) -> RuntimeError.
     Concentric circles: fix one centre, tie the others with addCoincident (a second fix_point on the same
     location over-constrains, VCS_SKETCH_OVER_CONSTRAINTS).
     """
+    target = to_sketch(s, mm(p[0]), mm(p[1]), mm(p[2]))
+    cur = sp.geometry
+    nx = _flip_coord(cur.x, target.x)
+    ny = _flip_coord(cur.y, target.y)
+    if nx is not None or ny is not None:
+        new = P3(cur.x if nx is None else nx, cur.y if ny is None else ny, cur.z)
+        delta = cur.vectorTo(new)
+        if not sp.move(delta):
+            raise RuntimeError(f"fix_point: SketchPoint.move refused, delta {delta.length} cm")
     h, v = _sketch_dims(s, p)
-    anchor(s, sp, h, v)
+    if not skip_axes:
+        anchor(s, sp, h, v)
+        return
+    for k, expr in ((0, h), (1, v)):
+        if k not in skip_axes:
+            _anchor_axis(s, sp, k, expr)
 
 
 def _drop_inferred(s: adsk.fusion.Sketch, before: set[str]) -> None:
@@ -336,8 +392,61 @@ def _drop_inferred(s: adsk.fusion.Sketch, before: set[str]) -> None:
             gc.deleteMe()
 
 
-def param_poly(s: adsk.fusion.Sketch, pts: list[Pt], *, jitter_mm: float = 0.05) -> list[adsk.fusion.SketchLine]:
+def _norm_expr(e: str) -> str:
+    return "".join(e.split())
+
+
+def _in_plane_axes(s: adsk.fusion.Sketch) -> list[tuple[int, int]]:
+    """(model axis i, sketch axis k) for each in-plane model axis; the normal axis is left out."""
+    o = to_sketch(s, 0.0, 0.0, 0.0)
+    units = [to_sketch(s, 1.0, 0.0, 0.0), to_sketch(s, 0.0, 1.0, 0.0), to_sketch(s, 0.0, 0.0, 1.0)]
+    normal = max(range(3), key=lambda i: abs(units[i].z - o.z))
+    return [(i, 0 if abs(units[i].x - o.x) > abs(units[i].y - o.y) else 1) for i in range(3) if i != normal]
+
+
+def _hv_plan(s: adsk.fusion.Sketch, pts: list[Pt]) -> tuple[list[frozenset[int]], list[tuple[int, int]]]:
+    """hv=True plan: (per-vertex sketch axes to skip, (edge j, sketch axis k) H/V links).
+
+    Node (v, k) = sketch coordinate k of vertex v. Edge j (vertex j -> j+1 mod n) whose endpoints have the same
+    normalised expr on an in-plane model axis mapped to sketch axis k is a link: nodes (j, k) and (j+1, k) are equal,
+    k=1 -> addHorizontal (sketch y constant), k=0 -> addVertical. Linked nodes form sets; the lowest node of each set
+    is dimensioned / anchored, the others are skipped. Non-degenerate polygon -> links form a forest -> fully constrained.
+    """
+    n = len(pts)
+    links = [
+        (j, k)
+        for i, k in _in_plane_axes(s)
+        for j in range(n)
+        if _norm_expr(pts[j][i]) == _norm_expr(pts[(j + 1) % n][i])
+    ]
+    parent = {(v, k): (v, k) for v in range(n) for k in (0, 1)}
+
+    def find(x: tuple[int, int]) -> tuple[int, int]:
+        while parent[x] != x:
+            x = parent[x]
+        return x
+
+    for j, k in links:
+        a, b = find((j, k)), find(((j + 1) % n, k))
+        if a != b:
+            lo, hi = sorted((a, b))
+            parent[hi] = lo  # root = lowest node of its set
+    skip = [frozenset(k for k in (0, 1) if find((v, k)) != (v, k)) for v in range(n)]
+    return skip, links
+
+
+def param_poly(
+    s: adsk.fusion.Sketch,
+    pts: list[Pt],
+    *,
+    jitter_mm: float = 0.05,
+    hv: bool = False,
+) -> list[adsk.fusion.SketchLine]:
     """Closed polygon, every vertex dimensioned to its model-coordinate expressions (fully constrained).
+
+    hv=True (opt-in): an edge whose endpoints carry the same coordinate expr (whitespace-insensitive string) on an
+    in-plane axis gets addHorizontal / addVertical, and that coordinate is dimensioned once per linked set instead of
+    per vertex (_hv_plan). Still fully constrained, expressions stay live. hv=False: one dim per nonzero coordinate.
 
     Per-vertex in-plane start offset = jitter_mm + 0.013 * k * (axis + 1) mm (gaps L62/L64: exact shared coords ->
     inferred alignment -> VCS_SKETCH_OVER_CONSTRAINTS); the vertex dims snap it back. Geometric constraints created by
@@ -362,8 +471,19 @@ def param_poly(s: adsk.fusion.Sketch, pts: list[Pt], *, jitter_mm: float = 0.05)
     }  # constraints already on the sketch (user, earlier polygons)
     lines = poly(s, vals)
     _drop_inferred(s, before)  # inferred alignments would fight the vertex dims
-    for ln, p in zip(lines, pts):
-        fix_point(s, ln.startSketchPoint, p)
+    if not hv:
+        for ln, p in zip(lines, pts):
+            fix_point(s, ln.startSketchPoint, p)
+        return lines
+    skip, links = _hv_plan(s, pts)
+    for ln, p, sk in zip(lines, pts, skip):
+        fix_point(s, ln.startSketchPoint, p, skip_axes=sk)
+    gc = s.geometricConstraints
+    for j, k in links:  # after the dims: a move() of a constrained point could be refused
+        if k == 1:
+            gc.addHorizontal(lines[j])
+        else:
+            gc.addVertical(lines[j])
     return lines
 
 
@@ -412,6 +532,32 @@ def rect_xy_sketch(comp: adsk.fusion.Component, label: str, x0: str, y0: str, x1
     s = new_sketch(comp, "xy", label=label)
     rect_xy(s, x0, y0, x1, y1)
     return s
+
+
+def offset_curves(
+    s: adsk.fusion.Sketch,
+    curves: list[adsk.fusion.SketchCurve],
+    distance_expr: str | Ex,
+) -> adsk.fusion.OffsetConstraint:
+    """Offset connected curves by distance_expr (bound to the offset parameter; + right / - left of curve flow)."""
+    gc = s.geometricConstraints
+    offset = adsk.core.ValueInput.createByString(as_str(distance_expr))
+    inp = gc.createOffsetInput(curves, offset)
+    c = gc.addOffset2(inp)
+    if c is None:
+        raise RuntimeError("offset_curves: addOffset2 returned None (curves not a connected chain?)")
+    return c
+
+
+def center_on_origin(s: adsk.fusion.Sketch, rect_lines: list[adsk.fusion.SketchLine]) -> adsk.fusion.MidPointConstraint:
+    """Centre a rect() rectangle on the sketch origin: construction diagonal bottom-start to top-start, origin at its midpoint.
+
+    rect_lines = [bottom, right, top, left] as returned by rect().
+    """
+    bottom, _, top, _ = rect_lines
+    diag = s.sketchCurves.sketchLines.addByTwoPoints(bottom.startSketchPoint, top.startSketchPoint)
+    diag.isConstruction = True
+    return s.geometricConstraints.addMidPoint(s.originPoint, diag)
 
 
 @contextlib.contextmanager

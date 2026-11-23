@@ -1,15 +1,65 @@
 """User Parameter utilities for Fusion 360 parametric scripts."""
 
 import re
+from collections.abc import Mapping
 from types import SimpleNamespace
+from typing import NotRequired, TypedDict
 
 import adsk.core
 import adsk.fusion
+
+
+class SweepRange(TypedDict):
+    """Optional 4th spec item: live-sweep options for param_sweep.sweep_params.
+
+    min + max: expression strings (both or neither). values: explicit list instead (enum-like, e.g. ["0", "1"]).
+    Exclusive: values or min/max. no_geometry=True: skip the no-effect check (param only drives build-time stuff).
+    """
+
+    min: NotRequired[str]
+    max: NotRequired[str]
+    values: NotRequired[list[str]]
+    no_geometry: NotRequired[bool]
+
+
+# Spec entry: (expression, units, comment) or (expression, units, comment, SweepRange).
+ParamEntry = tuple[str, str, str] | tuple[str, str, str, SweepRange]
+
+_SWEEP_KEYS = frozenset({"min", "max", "values", "no_geometry"})
 
 # Fusion stores every length param internally in cm, whatever the display unit: value * 10 -> mm.
 _LENGTH_UNITS = {"mm", "cm", "m", "in", "ft"}
 _ANGLE_UNITS = {"deg", "rad"}
 _IDENT = re.compile(r"(?<![\w.])[A-Za-z_]\w*")
+
+
+def entry_fields(entry: ParamEntry) -> tuple[str, str, str]:
+    """(expression, units, comment) of a spec entry. 3- or 4-item entries accepted; other lengths -> ValueError."""
+    if len(entry) not in (3, 4):
+        raise ValueError(f"param spec entry needs 3 or 4 items (expr, units, comment[, sweep]), got {len(entry)}")
+    return entry[0], entry[1], entry[2]
+
+
+def entry_sweep(entry: ParamEntry) -> SweepRange | None:
+    """Sweep options of a spec entry (4th item), validated. None when the entry has no 4th item.
+
+    ValueError: unknown key, 'values' with min/max, min without max (or reverse), empty values.
+    """
+    entry_fields(entry)
+    if len(entry) == 3:
+        return None
+    opts = entry[3]
+    unknown = set(opts) - _SWEEP_KEYS
+    if unknown:
+        raise ValueError(f"sweep options: unknown keys {sorted(unknown)}; allowed {sorted(_SWEEP_KEYS)}")
+    has_min, has_max = "min" in opts, "max" in opts
+    if "values" in opts and (has_min or has_max):
+        raise ValueError("sweep options: 'values' and 'min'/'max' are exclusive")
+    if has_min != has_max:
+        raise ValueError("sweep options: 'min' and 'max' go together")
+    if "values" in opts and not opts["values"]:
+        raise ValueError("sweep options: 'values' is empty")
+    return opts
 
 
 def _prune_stale(design: adsk.fusion.Design, keep: set[str]) -> None:
@@ -41,13 +91,15 @@ def _prune_stale(design: adsk.fusion.Design, keep: set[str]) -> None:
 
 def ensure_params(
     design: adsk.fusion.Design,
-    spec: dict[str, tuple[str, str, str]],
+    spec: Mapping[str, ParamEntry],
     overwrite: bool = True,
     prune: bool = False,
 ) -> None:
     """Add or update user parameters. Idempotent.
 
-    spec: name -> (expression, units, comment)
+    spec: name -> (expression, units, comment) or (expression, units, comment, SweepRange).
+          The 4th item only declares the live-sweep range (min/max or values, see SweepRange);
+          it is validated here and used by param_sweep.sweep_params, not written to Fusion.
     Two passes, so expressions may reference parameters defined later in spec:
     pass 1 creates missing params with placeholder "0"; pass 2 sets every expression.
     overwrite=True : existing param -> expression (and comment) updated; unit change raises.
@@ -56,12 +108,16 @@ def ensure_params(
     prune=True     : after add/update, delete every user param not in spec (dependents first);
                      still referenced at the end -> RuntimeError listing names. Default keeps them.
     """
+    for entry in spec.values():
+        entry_sweep(entry)  # validates the optional 4th item early
     up = design.userParameters
     missing = {name for name in spec if up.itemByName(name) is None}
-    for name, (_, units, comment) in spec.items():
+    for name, entry in spec.items():
+        _, units, comment = entry_fields(entry)
         if name in missing:
             up.add(name, adsk.core.ValueInput.createByString("0"), units, comment)
-    for name, (expression, units, comment) in spec.items():
+    for name, entry in spec.items():
+        expression, units, comment = entry_fields(entry)
         if not overwrite and name not in missing:
             continue
         p = up.itemByName(name)

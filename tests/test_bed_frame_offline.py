@@ -202,7 +202,7 @@ def _family(monkeypatch: pytest.MonkeyPatch, **kw: Any) -> tuple[MagicMock, list
 
 
 def test_relief_family_plus_x_maps_corners_to_sketch(monkeypatch: pytest.MonkeyPatch) -> None:
-    pat, corners, dists = _family(monkeypatch, bed_dir="+x")
+    pat, corners, _dists = _family(monkeypatch, bed_dir="+x")
     x0, y0, x1, y1 = corners[0]
     # bed '+x': in-plane model axes y (lower index, spacing: 19.6..20.4, centre 20 = 50 - 30) and z (run:
     # -1.0..36.0 mm with 1 mm overrun)

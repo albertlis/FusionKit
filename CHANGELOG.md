@@ -4,6 +4,40 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `param_sweep` (new module): `sweep_params(design, spec)` sets each User Parameter that declares a range to its ends (or its `values`) in the live document, reads timeline health and body geometry, and restores the original expression (finally). Flags `DFAM_FAIL param_sweep` lines for a rejected expression, an unhealthy feature, a body count change, or no effect on geometry (BUILD-ONLY param).
+- `param_lint` (new module): `lint_entry` flags `BUILD_ONLY_PARAM` reads (`sketch.mm`, `eval_fresh`, `itemByName(...).value`) in the entry file and `parts/`. Opt-out per line: `# param-lint: build-only <reason>`.
+- `user_params`: a spec item may carry a 4th element `SweepRange` (`min` + `max`, or `values`, plus optional `no_geometry`). New helpers `entry_fields`, `entry_sweep`.
+
+### Changed
+
+- `build_and_check(..., params=None, sweep=False)`: sweep is off by default; run `sweep=True` at the done-gate. The summary line ends with `sweep=<N>p/<F>F`, `sweep=none` (no `params` given) or `sweep=off`. Sweep lines and `BUILD_ONLY_PARAM` lines follow the interference lines.
+- `build_and_check(..., budget_s=30.0)`: budget checked between stages (`None` = no budget). Exceeded stages print `SKIP <stage> budget`, show `skipped`, summary ends `budget=exceeded`. A stage not in `checks` shows `off`.
+- `expr.derive` accepts 4-item spec entries.
+- `build_and_check` prints `TIME <stage> <s>` lines (also when a stage raises). `param_sweep` prints `TIME baseline` and `TIME probe:<name>=<value> <s> cache_hits=N`.
+- `param_sweep` caches body verdicts by geometry fingerprint and frame; baseline measured once per sweep.
+- `dfam.teardrop_required_peak_mm` / `holes.teardrop_hole`, Ø ≤ 8 mm: required peak = min(r + 0.4, r√2). Flat-topped notch only where r + 0.4 < r√2 (Ø > ~1.93 mm), else full 45° point.
+- `printability.check_body`: bed-adjacent exemption only for faces ≥ `BED_ADJACENT_MIN_ANGLE_DEG` (44°).
+- `printability.check`: theta test runs before groove test; `_slit_walls` precomputed once per check.
+- `dfam._bridge_collinear` and groove rect build: faster (was O(M²) for merge). `dfam._groove_rects` recess-gap pairs come from a sweep over boxes sorted on one axis (`_gap_pairs`).
+- `param_sweep`: warp grooves are suppressed on probes of parameters that no groove expression refers to; their baseline is measured with grooves suppressed too. The verdict cache key includes the suppression state.
+- `printability.check_body`: per-body face geometry cache (`_GeomCache`, 5 mm snap grid over 1 mm-expanded face boxes); slit and groove tests use XY buckets; `_min_span` projects on the convex hull only (`_hull_idx`).
+- `features.convex_edges`: planar-planar creases decided from coedge topology (no `pointContainment`); containment probe is fallback only, counted in `CONVEX_STATS`.
+- Measured live by the maintainer (holder build, pitch 30): build 47 s -> 17 s; `check_body` 11-27 s -> 0.8 s per body.
+
+### Removed
+
+- `sketch.tangent`, `sketch.equal`, `sketch.parallel`, `sketch.perpendicular`, `sketch.midpoint`, `sketch.concentric`, `sketch.collinear`, `sketch.symmetric`, `sketch.smooth`, `sketch.polygon` wrappers. Use `s.geometricConstraints.addX` directly (raw adsk).
+- `holes.teardrop_hole(notch_max_d_mm=...)` param. Threshold fixed at `TEARDROP_NOTCH_MAX_D_MM` (8.0).
+
+### Fixed
+
+- `warp_relief_grooves`: live seed starts from the run low-edge expression.
+- `features.convex_edges`: false "not convex" on thin 45° chamfers.
+
 ## [0.1.0] - 2026-11-16
 
 ### Added

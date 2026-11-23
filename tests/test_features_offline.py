@@ -656,6 +656,18 @@ def test_count_evaluates_in_comp_design() -> None:
     um.evaluateExpression.assert_called_once_with("hole_count", "")
 
 
+def test_pattern_rectangular_always_adds_feature_at_qty_one(pattern_comp: Any) -> None:
+    got = pattern_rectangular(pattern_comp, [MagicMock()], MagicMock(), "1", "5 mm", label="t_pattern", always=True)
+    assert got is pattern_comp.features.rectangularPatternFeatures.add.return_value
+    pattern_comp.features.rectangularPatternFeatures.add.assert_called_once()
+
+
+def test_pattern_rectangular_always_default_false_keeps_none(pattern_comp: Any) -> None:
+    got = pattern_rectangular(pattern_comp, [MagicMock()], MagicMock(), "1", "5 mm", label="t_pattern", always=False)
+    assert got is None
+    pattern_comp.features.rectangularPatternFeatures.add.assert_not_called()
+
+
 def test_pattern_rectangular_qty_two_adds_feature(pattern_comp: Any) -> None:
     got = pattern_rectangular(pattern_comp, [MagicMock()], MagicMock(), "2", "5 mm", label="t_pattern")
     assert got is pattern_comp.features.rectangularPatternFeatures.add.return_value

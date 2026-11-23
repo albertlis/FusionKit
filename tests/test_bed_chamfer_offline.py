@@ -62,6 +62,15 @@ def test_bed_chamfer_distance_ratio_is_tan44(monkeypatch: pytest.MonkeyPatch) ->
     assert ratio == pytest.approx(math.tan(math.radians(44.0)), rel=1e-9)
 
 
+def test_bed_chamfer_expression_text_carries_angle(monkeypatch: pytest.MonkeyPatch) -> None:
+    # timeline text, not Python floats: bed leg = distance * tan(90 - angle); wall leg = distance / (sin phi + cos phi * tan angle)
+    _CORE.ValueInput.createByString.reset_mock()
+    _run(monkeypatch, [0.695])
+    exprs = [c.args[0] for c in _CORE.ValueInput.createByString.call_args_list]
+    assert exprs[0] == "(1 mm) * tan(44.0 deg)"
+    assert exprs[1] == "(1 mm) / (sin(90.0 deg) + cos(90.0 deg) * tan(46.0 deg))"
+
+
 def test_bed_chamfer_default_angle_is_46() -> None:
     assert inspect.signature(features.bed_chamfer).parameters["angle_deg"].default == 46.0
 

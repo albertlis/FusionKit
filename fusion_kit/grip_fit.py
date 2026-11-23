@@ -268,7 +268,7 @@ def _check_fin_count(
     parametric inputs (user parameter names) skip the check. Fusion design values are not read here."""
     try:
         d, i, t, r, lam = (evaluate(as_str(x), {}) for x in (diameter, interference, fin_thickness, relief, lean))
-        n = int(round(evaluate(as_str(fin_count), {})))
+        n = round(evaluate(as_str(fin_count), {}))
     except NameError:
         return
     m = max_fin_count(d, kind, r, t, i, lam)

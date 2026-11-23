@@ -9,6 +9,7 @@ import random
 import sys
 import time
 from collections.abc import Callable
+from itertools import pairwise
 from types import SimpleNamespace
 from typing import Any
 
@@ -238,7 +239,7 @@ def _ring_slit(ai_deg: list[float], ao_deg: list[float], r_in: float, r_out: flo
         return (r * math.cos(a), r * math.sin(a), z)
 
     for r, angles, sign in ((r_in, ai_deg, 1.0), (r_out, ao_deg, -1.0)):
-        for a0, a1 in zip(angles, angles[1:]):
+        for a0, a1 in pairwise(angles):
             m = math.radians((a0 + a1) / 2.0)
             out: Vec = (sign * math.cos(m), sign * math.sin(m), 0.0)
             p0, p1, p2, p3 = pt(r, a0, 0.0), pt(r, a1, 0.0), pt(r, a1, h), pt(r, a0, h)

@@ -10,6 +10,7 @@ from typing import Literal
 import adsk.core
 import adsk.fusion
 
+from fusion_kit.dfam import TEARDROP_NOTCH_MAX_D_MM, TEARDROP_NOTCH_MM, TEARDROP_WALL_DEG, teardrop_peak_mm
 from fusion_kit.enums import NEGATIVE_EXTENT
 from fusion_kit.expr import Ex
 from fusion_kit.features import _vi, collection, extrude, profiles, select_edges
@@ -321,7 +322,7 @@ def _pt_exprs(uv: tuple[float, float], w: float, normal: Axis) -> tuple[str, str
 
 
 def teardrop_points(
-    cx: float, cy: float, r_mm: float, wall_deg: float = 60.0, up: tuple[float, float] = (0.0, 1.0)
+    cx: float, cy: float, r_mm: float, wall_deg: float = TEARDROP_WALL_DEG, up: tuple[float, float] = (0.0, 1.0)
 ) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
     """Teardrop in plane coords: (peak, tan_left, tan_right) for circle centre (cx, cy), radius r_mm.
 
@@ -345,6 +346,42 @@ def teardrop_points(
     tan_l = (cx + r_mm * (sa * ux - ca * wx), cy + r_mm * (sa * uy - ca * wy))
     tan_r = (cx + r_mm * (sa * ux + ca * wx), cy + r_mm * (sa * uy + ca * wy))
     return peak, tan_l, tan_r
+
+
+def teardrop_flat_points(
+    cx: float,
+    cy: float,
+    r_mm: float,
+    notch_mm: float = TEARDROP_NOTCH_MM,
+    wall_deg: float = TEARDROP_WALL_DEG,
+    up: tuple[float, float] = (0.0, 1.0),
+) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]]:
+    """Notch teardrop (small hole) in plane coords: (top_l, top_r, tan_r, tan_l).
+
+    Flanks are the same tangent lines as teardrop_points (wall_deg from up); the full point is clipped flat at
+    h = r_mm + notch_mm along up. Top corners at half-width (r - sin(wall) * h) / cos(wall). Needs r > sin(wall) * h,
+    else the flat top reaches the full peak r / sin(wall) and ValueError.
+    """
+    if r_mm <= 0 or notch_mm <= 0:
+        raise ValueError(f"teardrop_flat_points: r_mm and notch_mm must be > 0, got {r_mm}, {notch_mm}")
+    if not 0 < wall_deg < 90:
+        raise ValueError(f"teardrop_flat_points: wall_deg must be in (0, 90), got {wall_deg}")
+    n = math.hypot(up[0], up[1])
+    if n == 0:
+        raise ValueError("teardrop_flat_points: up must be non-zero")
+    ux, uy = up[0] / n, up[1] / n
+    wx, wy = -uy, ux
+    a = math.radians(wall_deg)
+    sa, ca = math.sin(a), math.cos(a)
+    h = r_mm + notch_mm
+    half = (r_mm - sa * h) / ca
+    if half <= 0:
+        raise ValueError(f"teardrop_flat_points: top {h:.3f} >= full peak {r_mm / sa:.3f} (r {r_mm}, wall {wall_deg})")
+    top_l = (cx + h * ux - half * wx, cy + h * uy - half * wy)
+    top_r = (cx + h * ux + half * wx, cy + h * uy + half * wy)
+    tan_l = (cx + r_mm * (sa * ux - ca * wx), cy + r_mm * (sa * uy - ca * wy))
+    tan_r = (cx + r_mm * (sa * ux + ca * wx), cy + r_mm * (sa * uy + ca * wy))
+    return top_l, top_r, tan_r, tan_l
 
 
 def seam_notch_points(
@@ -391,11 +428,14 @@ def teardrop_hole(
     depth_mm: float,
     *,
     label: str,
-    wall_deg: float = 60.0,
+    wall_deg: float = TEARDROP_WALL_DEG,
     up: tuple[float, float] = (0.0, 1.0),
     normal: Axis = "y",
 ) -> None:
-    """Teardrop hole (circle r_mm + apex toward up) cut symmetric depth_mm through body, on the sketch plane.
+    """Teardrop hole cut symmetric depth_mm through body, on the sketch plane.
+
+    Flat-topped notch (top at r_mm + TEARDROP_NOTCH_MM) when d <= TEARDROP_NOTCH_MAX_D_MM and that top sits below the
+    full point; otherwise full point, apex r / sin(wall). Same threshold as dfam.teardrop_required_peak_mm.
 
     center_mm : model point (mm) of circle centre. up = (horizontal, vertical) in plane coords (xyz order, normal
                 "y" -> x, z; body.py XZ window: up=(0,1) = +Z). normal = sketch plane normal axis.
@@ -407,8 +447,12 @@ def teardrop_hole(
         raise ValueError(f"teardrop_hole: r_mm and depth_mm must be > 0, got {r_mm}, {depth_mm}")
     ni, ai, bi = _plane_axes(normal)
     cu, cv, w = center_mm[ai], center_mm[bi], center_mm[ni]
-    peak, tan_l, tan_r = teardrop_points(cu, cv, r_mm, wall_deg, up)
-    param_poly(sketch, [_pt_exprs(p, w, normal) for p in (peak, tan_l, tan_r)])
+    if 2 * r_mm <= TEARDROP_NOTCH_MAX_D_MM and r_mm + TEARDROP_NOTCH_MM < teardrop_peak_mm(r_mm, wall_deg):
+        verts = list(teardrop_flat_points(cu, cv, r_mm, TEARDROP_NOTCH_MM, wall_deg, up))
+    else:
+        peak, tan_l, tan_r = teardrop_points(cu, cv, r_mm, wall_deg, up)
+        verts = [peak, tan_l, tan_r]
+    param_poly(sketch, [_pt_exprs(p, w, normal) for p in verts])
     cx, cy, cz = _to_model(cu, cv, w, normal)
     c = circle(sketch, cx, cy, r_mm, z=cz, diameter=f"{2 * r_mm:.6f} mm")
     fix_point(sketch, c.centerSketchPoint, (f"{cx:.6f} mm", f"{cy:.6f} mm", f"{cz:.6f} mm"))

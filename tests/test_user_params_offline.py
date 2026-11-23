@@ -227,3 +227,44 @@ def test_prune_undeletable_raises_with_name(up_mod: types.ModuleType) -> None:
     design.userParameters.add("wall", "2 * gap", "mm", "")
     with pytest.raises(RuntimeError, match="gap"):
         up_mod.ensure_params(design, {"wall": ("2 * gap", "mm", "")}, prune=True)
+
+
+def test_four_item_entry_writes_expression_not_range(up_mod: types.ModuleType) -> None:
+    """4th item = live-sweep range only; Fusion gets expression, units, comment from the first three."""
+    design = FakeDesign()
+    up_mod.ensure_params(design, {"gap": ("1 mm", "mm", "g", {"min": "0.5 mm", "max": "3 mm"})})
+    p = _param(design.userParameters, "gap")
+    assert p.expression == "1 mm"
+    assert p.comment == "g"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        ("1 mm", "mm", "", {"foo": "x"}),
+        ("1 mm", "mm", "", {"min": "0 mm"}),
+        ("1 mm", "mm", "", {"values": ["0"], "min": "0 mm", "max": "2 mm"}),
+        ("1 mm", "mm", "", {"values": []}),
+        ("1 mm", "mm"),
+    ],
+)
+def test_bad_spec_entry_rejected_before_any_write(up_mod: types.ModuleType, entry: tuple) -> None:
+    design = FakeDesign()
+    with pytest.raises(ValueError):
+        up_mod.ensure_params(design, {"gap": entry})
+    assert design.userParameters.count == 0
+
+
+def test_entry_sweep_and_fields(up_mod: types.ModuleType) -> None:
+    assert up_mod.entry_sweep(("1 mm", "mm", "")) is None
+    assert up_mod.entry_sweep(("1 mm", "mm", "", {"values": ["0", "1"]})) == {"values": ["0", "1"]}
+    assert up_mod.entry_fields(("1 mm", "mm", "c", {"no_geometry": True})) == ("1 mm", "mm", "c")
+
+
+def test_expr_derive_accepts_four_item_entries() -> None:
+    from fusion_kit.expr import derive
+
+    plain = derive({"a": ("2 mm", "mm", "")}, {})
+    with_sweep = derive({"a": ("2 mm", "mm", "", {"min": "1 mm", "max": "3 mm"})}, {})
+    assert with_sweep == plain
+    assert "a" in with_sweep

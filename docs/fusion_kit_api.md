@@ -8,7 +8,7 @@ Rows = every public module-level def (no leading `_`). Enforced by `tests/test_a
 ## build_check
 | helper | signature | replaces raw adsk |
 |---|---|---|
-| build_check.build_and_check | build_and_check(entry_path, *, print_frames=None, interference=True, screenshot=None) — run_part(entry, "build") with stdout captured (printed only on error: last 20 lines, exception re-raised) + report_data (dfam=False) + dfam + check_body per body (print_frames {comp name: Rot}, default IDENTITY) + interference over root occurrences + save_screenshot; prints and returns compact keyword lines (one per body, summary, max 3 detail lines per body) | |
+| build_check.build_and_check | build_and_check(entry_path, *, print_frames=None, interference=True, screenshot=None, params=None, sweep=False, sweep_combos=None, checks=frozenset({"dfam","print","interf","skq"}), budget_s=30.0) — run_part(entry, "build") with stdout captured (printed only on error: last 20 lines, exception re-raised) + report_data (dfam=False) + dfam + check_body per body (print_frames {comp name: Rot}, default IDENTITY) + interference over root occurrences + param_sweep.sweep_params (params = the PARAMS spec; sweep_combos = [{param: expr}] extra probes, run without params too; sweep=none when params and sweep_combos omitted, sweep=off when sweep=False; print_frames passed to the per-probe DfAM/print check; FAIL lines DFAM_FAIL param_sweep, block the Stop hook) + param_lint.lint_entry over entry + parts/ (BUILD_ONLY_PARAM lines, not blocking) + save_screenshot; SKQ lines = sketch_quality.check(design) (all components incl. root) + feature_quality.check(design), summary skq=<F>F/<W>W; prints and returns compact keyword lines (one per body, summary with sweep=<N>p/<F>F, max 3 detail lines per body) | |
 | build_check.format_check | format_check(bodies, summary) -> compact text from BodyCheck / Summary. Pure | |
 
 ## component
@@ -21,6 +21,8 @@ Rows = every public module-level def (no leading `_`). Enforced by `tests/test_a
 | helper | signature | replaces raw adsk |
 |---|---|---|
 | dfam.teardrop_peak_mm | teardrop_peak_mm(r_mm, wall_deg) | |
+| dfam.teardrop_required_peak_mm | teardrop_required_peak_mm(r_mm) | |
+| dfam.teardrop_notch | teardrop_notch(r_mm) | |
 | dfam.check_holes | check_holes(holes) | |
 | dfam.check_edges | check_edges(edges) | |
 | dfam.check_body_facts | check_body_facts(body_fact) | |
@@ -40,6 +42,8 @@ Rows = every public module-level def (no leading `_`). Enforced by `tests/test_a
 | dfam.in_warp_groove | in_warp_groove(point_mm, grooves, bed_z_mm) | |
 | dfam.in_groove_rect | in_groove_rect(point_mm, r, bed_z_mm) | |
 | dfam.warp_family_mm | warp_family_mm(body) | |
+| dfam.warp_frames | warp_frames(lo, hi, faces_of) | |
+| dfam.in_warp_frames | in_warp_frames(point_mm, frames) | |
 | dfam.bed_axis | bed_axis(bed) -> (axis index 0/1/2 for x/y/z, outward sign); ValueError unless bed in -z, +z, -x, +x, -y, +y | |
 | dfam.bed_from_body | bed_from_body(body) — stored bed, absent = "-z" | `attributes.itemByName` |
 | dfam.set_bed | set_bed(body, bed) — validates via bed_axis, writes ("dfam", "bed") | `attributes.add` |
@@ -61,20 +65,35 @@ Rows = every public module-level def (no leading `_`). Enforced by `tests/test_a
 | expr.evaluate | evaluate(expr, names) | |
 | expr.derive | derive(spec, names) | |
 
+## feature_quality
+| helper | signature | replaces raw adsk |
+|---|---|---|
+| feature_quality.check | check(design) -> list[str] — `SKQ_WARN <rule>: <feature> <detail>` lines over the timeline (groups and suppressed items skipped; edge_by_edge run pass after the per-item rules). Rules: extent_distance_matches_body, cut_blind_through, twin_extrudes, hole_as_extrude, plane_offset_expr, edge_by_edge, thin_as_offset. Opt-out attr ("skq","skq_skip") `<rule>:<reason>`. Features with a non-sketch (BRepFace) profile skipped. All WARN, blocks nothing | |
+| feature_quality.rule_extent_distance_matches_body | rule_extent_distance_matches_body(ent, earlier) -> detail or None. One-side Distance extrude whose end (either sign) lies within 0.01 mm of a parallel plane of an earlier construction plane / body face -> use to= (ToEntityExtent). Plane-level only, face extent not checked. Faces the feature itself created (startFaces/endFaces/sideFaces, matched by entityToken) are ignored (own end cap); other faces of the same body and other bodies count. Pure over duck-typed entities | |
+| feature_quality.rule_cut_blind_through | rule_cut_blind_through(ent, earlier) -> detail or None. Cut Distance deeper than the far side of the feature's body bbox (sign from distance) -> through_all. Pure | |
+| feature_quality.rule_twin_extrudes | rule_twin_extrudes(ent, earlier) -> detail or None. Two one-side Distance extrudes, same profile token set, opposite distance sign -> symmetric / two sides. Direction is inferred from the distance sign only (no direction property on ExtrudeFeature) | |
+| feature_quality.rule_hole_as_extrude | rule_hole_as_extrude(ent, earlier) -> detail or None. Cut extrude with one profile, one loop, one SketchCircle curve -> holes.hole_simple / holes.hole_counterbore. Pure | |
+| feature_quality.rule_plane_offset_expr | rule_plane_offset_expr(ent, earlier) -> detail or None. ConstructionPlane offset definition whose offset expression divides by exactly 2 -> plane_midplane. Pure | |
+| feature_quality.rule_edge_by_edge | rule_edge_by_edge(entries) -> list[(feature name, detail)]. Consecutive single-edge-set fillets (ConstantRadius radius) or chamfers (EqualDistance distance) with identical expression -> one edge set + tangent chain; reports every member after the first of a run. Opt-out per member. Pure | |
+| feature_quality.rule_thin_as_offset | rule_thin_as_offset(ent, earlier) -> detail or None. Non-thin ExtrudeFeature whose profile holds >= 2 curves that are children of an OffsetConstraint in its parent sketch -> thin extrude. Pure | |
+
 ## features
 | helper | signature | replaces raw adsk |
 |---|---|---|
 | features.collection | collection(items) | `ObjectCollection` |
 | features.profile | profile(sketch, outer=True) | `profileLoops`, `areaProperties` |
 | features.profiles | profiles(sketch, predicate=None) | |
-| features.extrude | extrude(comp, prof, distance, op="new", ..., label) | `extrudeFeatures`, `setSymmetricExtent`, `setOneSideExtent` |
-| features.revolve | revolve(comp, prof, axis, op, angle, *, bodies=None, label) | `revolveFeatures`, `setAngleExtent` |
+| features.extrude | extrude(comp, prof, distance, op="new", ..., label, *, to=None, to_offset=None, through_all=False, two_sides=None, start_from=None) — distance=None with to/through_all/two_sides; to/through_all/two_sides mutually exclusive, symmetric/taper not with them, start_from exclusive with start_offset/symmetric (ValueError) | `extrudeFeatures`, `setSymmetricExtent`, `setOneSideExtent`, `setTwoSidesExtent`, `ToEntityExtentDefinition`, `ThroughAllExtentDefinition`, `FromEntityStartDefinition` |
+| features.revolve | revolve(comp, prof, axis, op, angle=None, *, bodies=None, symmetric=False, to=None, label) — angle None = 360 deg; to= exclusive with angle/symmetric | `revolveFeatures`, `setAngleExtent`, `setOneSideToExtent` |
 | features.pattern_circular | pattern_circular(comp, entities, axis, qty, total, label) | `circularPatternFeatures` |
-| features.pattern_rectangular | pattern_rectangular(comp, entities, axis, qty, distance, distance_type, label) | `rectangularPatternFeatures`, `setDirectionTwo` |
+| features.pattern_rectangular | pattern_rectangular(comp, entities, axis, qty, distance, distance_type, *, always=False, label) | `rectangularPatternFeatures`, `setDirectionTwo` |
 | features.axis_plane | axis_plane(comp, axis, expr, value_mm, label) | `setByOffset` |
 | features.pattern_grid | pattern_grid(comp, entities, dir_one, qty_one, spacing_one, dir_two, qty_two, spacing_two, label) | `rectangularPatternFeatures`, `setDirectionTwo` |
 | features.combine | combine(comp, target, tools, op, keep_tools, label) — tools deduped by entityToken, target dropped; ValueError if none left | `combineFeatures` |
 | features.move_body | move_body(comp, bodies, dx, dy, dz, label) | `moveFeatures`, `defineAsTranslateXYZ` |
+| features.shell | shell(comp, faces, thickness, *, label) — faces = faces to remove; [] -> ValueError | `shellFeatures`, `ShellFeatureInput.insideThickness` |
+| features.plane_midplane | plane_midplane(comp, p1, p2, *, label) — midway between two planar faces/planes; co-planar -> RuntimeError | `constructionPlanes`, `setByTwoPlanes` |
+| features.axis_by_cylinder | axis_by_cylinder(comp, face, *, label) — axis of cylindrical/conical/toroidal face; other -> RuntimeError | `constructionAxes`, `setByCircularFace` |
 | features.rotate_body | rotate_body(comp, bodies, axis, angle, label) | `moveFeatures`, `defineAsRotate` |
 | features.single_body | single_body(comp, prefix="") | |
 | features.axis_y_through | axis_y_through(comp, x, z, label) | `setByTwoPlanes` |
@@ -83,7 +102,7 @@ Rows = every public module-level def (no leading `_`). Enforced by `tests/test_a
 | features.rotate_body_about_x | rotate_body_about_x(comp, bodies, y, z, angle, label) | |
 | features.face_normal | face_normal(face, point=None) | `getNormalAtPoint` |
 | features.faces_by_normal | faces_by_normal(body, normal, min_dot=0.6) | |
-| features.convex_edges | convex_edges(body, edges, probe_mm=0.1) | `pointContainment` |
+| features.convex_edges | convex_edges(body, edges, probe_mm=0.1). Planar-planar edges decided from coedge topology (zero probes); containment probe only as fallback, counted in `CONVEX_STATS` | `pointContainment` (fallback only) |
 | features.edges_at_xy | edges_at_xy(body, x_mm, y_mm, tol_mm=0.05) | `edges`, `boundingBox` |
 | features.offset_plane | offset_plane(comp, base, distance, label) | `setByOffset` |
 | features.planar_faces | planar_faces(body, axis, at_mm, normal_sign=None, tol_mm=0.01) | |
@@ -92,10 +111,10 @@ Rows = every public module-level def (no leading `_`). Enforced by `tests/test_a
 | features.chamfer_greedy | chamfer_greedy(comp, edges, distance, *, label, min_len_mm=0.0) — probe each edge alone (RuntimeError = refused, shorter than min_len_mm skipped), ONE chamfer over accepted; None if none | |
 | features.mirror | mirror(comp, feats, plane, compute, label) | `mirrorFeatures` |
 | features.mirror_bodies | mirror_bodies(comp, bodies, plane, label) — returns mirrored bodies | `mirrorFeatures`, `createInput`, `bodies` |
-| features.bed_chamfer | bed_chamfer(comp, body, distance, label, only_largest_bed_face=False, angle_deg=46.0, bed="-z", min_edge_mm=0.0, inner_loops=False) — bed = bed face dir ("-z" min Z default, "+x" X-max, ...); stored via set_bed; one two-distance edge set per interior-dihedral group: `distance` = 90-deg-equivalent wall leg, bed footprint = distance / tan(angle_deg) at any phi, wall leg = distance * bed_wall_ratio(90)/bed_wall_ratio(phi) (105 = dovetail wall); `angle_deg` = chamfer face angle FROM HORIZONTAL, must be in (45, 90) exclusive else ValueError (46 -> n_z 0.695; 45 FAILS). isFlipped tried False then True; accept only if face angle acos(\|n_z\|) = angle_deg ±0.5 and \|n_z\| < 0.707 (Fusion order undocumented); `min_edge_mm` skips bed edges shorter than mm; `inner_loops=True` also chamfers inner loops (holes/windows) of the bed face, same dihedral groups and min_edge_mm (default False = holes sharp, fits) |
+| features.bed_chamfer | bed_chamfer(comp, body, distance, label, only_largest_bed_face=False, angle_deg=46.0, bed="-z", min_edge_mm=0.0, inner_loops=False) — bed = bed face dir ("-z" min Z default, "+x" X-max, ...); stored via set_bed; one two-distance edge set per interior-dihedral group: `distance` = 90-deg-equivalent wall leg, bed footprint = distance * tan(90 - angle_deg) at any phi, wall leg = distance / (sin(phi) + cos(phi) * tan(angle_deg)) (105 = dovetail wall); both legs are timeline expression text (angle inside, phi = literal dihedral); `angle_deg` = chamfer face angle FROM HORIZONTAL, must be in (45, 90) exclusive else ValueError (46 -> n_z 0.695; 45 FAILS). isFlipped tried False then True; accept only if face angle acos(\|n_z\|) = angle_deg ±0.5 and \|n_z\| < 0.707 (Fusion order undocumented); `min_edge_mm` skips bed edges shorter than mm; `inner_loops=True` also chamfers inner loops (holes/windows) of the bed face, same dihedral groups and min_edge_mm (default False = holes sharp, fits) |
 | features.select_edges | select_edges(body, circle_r, axis, convex_top, tol_mm, on_plane, face_normal, min_dot) | |
-| features.groove_positions | groove_positions(length_mm, pitch_mm=30.0) | |
-| features.warp_relief_grooves | warp_relief_grooves(comp, body, *, label, width_mm=0.8, depth_mm=0.3, pitch_mm=30.0, bed="-z") — bed = print bed face (BedDir); two families = in-plane axes; stores set_bed. Seed rect in model coords (_seed_rect); cut depth sign from plane normal; live smoke tests/smoke/fusion_smoke_bed_orientation.py | `axis_plane`, `extrude`, `patterns` |
+| features.groove_positions | groove_positions(length_mm, pitch_mm=30.0) | span <= 35 mm -> []; else >= 2 centres symmetric about 0 (dfam needs >= 2 lines, never 1): pitch spacing n = max(2, floor(L/pitch)) if outer centre >= GROOVE_EDGE_MIN_MM (3 mm) from bed edge and every segment < 35 mm; else n = max(2, floor(L/35)) centres at equal segments L/(n+1). Used by features._relief_family (spacing = centres[1]-centres[0]) |
+| features.warp_relief_grooves | warp_relief_grooves(comp, body, *, label, width_mm=0.8, depth_mm=0.3, pitch_mm=30.0, bed="-z", width_expr=None, depth_expr=None, length_exprs=None, margin_mm=0.0, margin_expr=None, target_pitch_expr=None, run_exprs=None) — LIVE MODE: length_exprs = {family axis letter: Fusion expr of body extent along that axis, e.g. {"z": "bracket_length"}}; families in the map get count = floor((L - 2 * margin_expr) / target_pitch_expr) + 2 (max() rejected by Fusion, so no clamp: count >= 2 for any L >= 2 margin), spacing = (L - 2 * margin_expr) / (count - 1) (<= pitch), seed centre = bed edge + margin_expr (margin_mm = value, >= GROOVE_EDGE_MIN_MM); pattern always=True. Live families ALWAYS build (no 35 mm gate; qty >= 2 by construction). run_exprs = {run axis letter: (lo_expr, hi_expr)} = Fusion expressions of the body extent along the run axis (the other in-plane axis); seed run ends = (lo_expr) - 1.000000 mm / (hi_expr) + 1.000000 mm (_GROOVE_OVERRUN_MM). Required for every live family, extra keys ValueError, no literal fallback. Edits to those params re-space grooves and move seed run ends with no script re-run; bed choice and literal (non-live) family presence stay build-time; no bed plane/sketch created when no family builds. Families not in the map: literal (old). Pass pitch_mm = value of target_pitch_expr. width_expr / depth_expr = optional timeline expression strings (User Parameter names): sketch width dim = centre -/+ (width_expr)/2, seed cut depth = (depth_expr); None = literal width_mm/depth_mm. Literal mode (no length_exprs): pitch_mm stays literal by design: positions, qty, spacing are computed at build -> re-run script after changing pitch or part size. Pass the numeric values too. Equal-segment fallback when pitch_mm does not fit the span (groove_positions). bed = print bed face (BedDir); two families = in-plane axes; stores set_bed. Seed rect in model coords (_seed_rect); cut depth sign from plane normal; live smoke tests/smoke/fusion_smoke_bed_orientation.py | `axis_plane`, `extrude`, `patterns` |
 | features.axis_z_through | axis_z_through(comp, x, y, label) | `setByTwoPlanes` |
 
 ## grip_fit
@@ -131,10 +150,11 @@ Rows = every public module-level def (no leading `_`). Enforced by `tests/test_a
 | holes.hole_simple | hole_simple(comp, points, diameter, depth=None, *, label, through_dir) | `holeFeatures`, `createSimpleInput` |
 | holes.hole_counterbore | hole_counterbore(comp, points, diameter, cb_diameter, cb_depth, depth=None, *, label, through_dir) | `holeFeatures`, `createCounterboreInput` |
 | holes.hole_countersink | hole_countersink(comp, points, diameter, cs_diameter, cs_angle="90 deg", depth=None, *, label, through_dir) | `holeFeatures`, `createCountersinkInput` |
-| holes.teardrop_points | teardrop_points(cx, cy, r_mm, wall_deg=60.0, up=(0.0, 1.0)) | |
+| holes.teardrop_points | teardrop_points(cx, cy, r_mm, wall_deg=45.0, up=(0.0, 1.0)) | |
+| holes.teardrop_flat_points | teardrop_flat_points(cx, cy, r_mm, notch_mm=0.4, wall_deg=45.0, up=(0.0, 1.0)) → (top_l, top_r, tan_r, tan_l) | |
 | holes.seam_notch_points | seam_notch_points(cx, cy, r_mm, notch_mm=0.3, dir_deg=90.0) | |
 | holes.sacrificial_depth | sacrificial_depth(cb_depth_mm, layer_mm=0.2) | |
-| holes.teardrop_hole | teardrop_hole(comp, sketch, center_mm, r_mm, body, depth_mm, *, label, wall_deg=60.0, up=(0.0, 1.0), normal="y") | |
+| holes.teardrop_hole | teardrop_hole(comp, sketch, center_mm, r_mm, body, depth_mm, *, label, wall_deg=45.0, up=(0.0, 1.0), normal="y") | |
 | holes.seam_notch | seam_notch(comp, sketch, center_mm, r_mm, body, depth_mm, *, label, notch_mm=0.3, dir_deg=90.0, normal="y") | |
 
 ## joints
@@ -148,6 +168,27 @@ Rows = every public module-level def (no leading `_`). Enforced by `tests/test_a
 | helper | signature | replaces raw adsk |
 |---|---|---|
 | loader.run_part | run_part(entry_path, context="") | |
+
+## param_lint
+| helper | signature | replaces raw adsk |
+|---|---|---|
+| param_lint.lint_source | lint_source(source, filename) -> list[LintHit] sorted by line, 5 rules. BUILD_ONLY_PARAM: build-time user-param reads (sketch.mm / eval_fresh / itemByName(...).value; string-literal names, unit words dropped); opt-out `# param-lint: build-only <reason>`. Sketch rules, opt-out `# sketch-lint: <RULE> <reason>` (reason required): SKETCH_ARC (arc built in sketch code -> 3D fillet), DIM_EXPR_MATH (dim / .expression arithmetic -> constraint), FIX_POINT (isFixed = True or fixed_poly -> no fixed points), THROUGH_GUESS (WARN: cut extrude literal distance, no through_all / to). Pure | |
+| param_lint.lint_entry | lint_entry(entry_path) -> list[LintHit]: lint_source over the entry file and every .py under its parts/ (missing entry -> OSError) | |
+| param_lint.format_lint | format_lint(hits) -> ['BUILD_ONLY_PARAM <name> <file>:<line>', ...]. Pure | |
+
+## param_sweep
+| helper | signature | replaces raw adsk |
+|---|---|---|
+| param_sweep.candidates | candidates(original, opts) -> expressions to probe: original first, then min and max (or values in order), duplicates dropped. Pure | |
+| param_sweep.unhealthy_names | unhealthy_names(items) -> names of timeline features that are not groups, not suppressed and not healthy. Pure | |
+| param_sweep.geometry | geometry(bodies) -> (body count, total volume cm3, bbox mm as (min xyz, max xyz) or None when no bodies). Pure | |
+| param_sweep.same_geometry | same_geometry(a, b) -> True when both probes measured and count, volume (1e-6 cm3) and bbox (1e-3 mm) agree. Pure | |
+| param_sweep.judge | judge(name, probes, no_geometry, bodies_expected=None) -> DFAM_FAIL param_sweep lines: rejected by Fusion, unhealthy (names), bodies != expected (baseline count unless given), dfam: probe DfAM FAIL not in baseline (first shown, (+N more)), ovh: probe print FAIL while baseline ok (overhang mm2), no effect on geometry (BUILD-ONLY param; needs >= 2 probes, skipped when no_geometry). Pure | |
+| param_sweep.new_fails | new_fails(baseline, probe) -> list of DfAM FAIL texts ('rule: msg') of probe that baseline lacks; [] when either probe rejected. Pure | |
+| param_sweep.format_sweep | format_sweep(rows) -> ['param_sweep: N params, F fail', *fail lines]; F = params with >= 1 fail. Pure | |
+| param_sweep.sweep_token | sweep_token(rows) -> '<N>p/<F>F' (summary keyword value). Pure | |
+| param_sweep.sweep_params | sweep_params(design, spec, bodies_expected=None, combos=None, print_frames=None) -> list[SweepRow]: combos = [{param: expr}] set together as one extra probe per combo (row name 'a+b', baseline = originals, no-effect check off, unknown name / empty combo -> ValueError before anything is set); print_frames {comp name: Rot} feed body_verdict per probe; for each spec entry with a 4th item min+max or values, set userParameters.itemByName(n).expression to each candidate, read timeline health and native bodies of all components, restore the original expression (finally). RuntimeError from the setter is recorded as a `rejected` finding. Params without a range are skipped; unknown name -> ValueError. One Fusion recompute per probe | `userParameters`, `expression`, `timeline`, `healthState`, `isSuppressed`, `isGroup`, `allComponents`, `physicalProperties` |
+| param_sweep.body_verdict | body_verdict(body, up_rot) -> (FAIL findings as 'rule: msg', print overhang mm2, print ok) per body: same calls as build_check._body_check (dfam_check reads the stored bed, check_body in up_rot). Fusion side | `dfam_check`, `check_body` |
 
 ## printability
 | helper | signature | replaces raw adsk |
@@ -169,7 +210,7 @@ Rows = every public module-level def (no leading `_`). Enforced by `tests/test_a
 ## report
 | helper | signature | replaces raw adsk |
 |---|---|---|
-| report.report | report(comp, dfam=True) | `healthState`, `isFullyConstrained` |
+| report.report | report(comp, dfam=True). Prints `design_timeline_unhealthy=N ... timeline_numbered=N suppressed=N`; `suppressed` = timeline features with `isSuppressed` (excluded from unhealthy) | `healthState`, `isFullyConstrained`, `isSuppressed` |
 | report.report_data | report_data(comp, dfam=True) -> ReportData (structured facts, prints nothing; findings None when dfam=False) | `healthState`, `isFullyConstrained` |
 | report.format_report | format_report(data) -> report() text from ReportData. Pure | |
 | report.world_bbox | world_bbox(occ) | |
@@ -193,13 +234,27 @@ Rows = every public module-level def (no leading `_`). Enforced by `tests/test_a
 | sketch.dim_from | dim_from(s, ref, ref_mm, p, offsets) | |
 | sketch.anchor | anchor(s, p, h=None, v=None, ref=None) | `addCoincident`, `addVerticalPoints`, `addHorizontalPoints` |
 | sketch.mm | mm(expr) | `evaluateExpression` |
-| sketch.fix_point | fix_point(s, sp, p) | |
-| sketch.param_poly | param_poly(s, pts, jitter_mm=0.05) | `deleteMe` |
+| sketch.fix_point | fix_point(s, sp, p, skip_axes=frozenset()) | |
+| sketch.param_poly | param_poly(s, pts, jitter_mm=0.05, hv=False) | `deleteMe`, `addHorizontal`, `addVertical` (hv=True) |
 | sketch.fixed_poly | fixed_poly(s, pts) | `isFixed` |
 | sketch.rect_two_corners | rect_two_corners(s, a, b, side_h, side_v) | |
 | sketch.rect_xy | rect_xy(s, x0, y0, x1, y1) | |
 | sketch.rect_xy_sketch | rect_xy_sketch(comp, label, x0, y0, x1, y1) | |
 | sketch.deferred | deferred(s) | `isComputeDeferred` |
+| sketch.offset_curves | offset_curves(s, curves, distance_expr) | `createOffsetInput`, `addOffset2`, `ValueInput.createByString` |
+| sketch.center_on_origin | center_on_origin(s, rect_lines) | `addByTwoPoints`, `addMidPoint`, `isConstruction` |
+
+## sketch_quality
+| helper | signature | replaces raw adsk |
+|---|---|---|
+| sketch_quality.half_operand | half_operand(expr) -> X when expr is exactly `X / 2` (divisor 2 only; 2.5, 20, `2*X`, operators in X -> None) (expr_dim rule). Pure | |
+| sketch_quality.pattern_multiple | pattern_multiple(expr) -> (name, n) when expr is exactly `name*n` or `n*name` with integer n >= 2 (pattern_expr rule). Pure | |
+| sketch_quality.check_facts | check_facts(f, skip=None) -> SKQ_FAIL/SKQ_WARN lines for one SketchFacts; skip {rule: reason} -> SKQ_WARN skq_skip; unknown rule -> SKQ_WARN skq_skip_unknown (ignored, never raises). Pure | |
+| sketch_quality.skq_token | skq_token(lines) -> '<F>F/<W>W' (summary keyword value). Pure | |
+| sketch_quality.sketch_facts | sketch_facts(sk) -> SketchFacts read from a live sketch (profiles, sketchCurves, sketchPoints, geometricConstraints, sketchDimensions) | `profiles`, `profileLoops`, `profileCurves`, `sketchCurves`, `sketchPoints`, `geometricConstraints`, `sketchDimensions`, `isFullyConstrained`, `isFixed`, `isReference`, `objectType` |
+| sketch_quality.skip_of | skip_of(sk) -> ({rule: reason}, warn lines) from attribute ("skq", "skq_skip"); absent -> ({}, []); malformed -> ({}, [SKQ_WARN skq_skip_malformed]), never raises | `attributes.itemByName` |
+| sketch_quality.check_sketches | check_sketches(sketches) -> SKQ lines over one collection of sketches (report() uses the comp's sketches) | |
+| sketch_quality.check | check(design) -> SKQ lines over all sketches of all components (build_check) | `allComponents` |
 
 ## steps
 | helper | signature | replaces raw adsk |
@@ -218,9 +273,11 @@ Rows = every public module-level def (no leading `_`). Enforced by `tests/test_a
 ## user_params
 | helper | signature | replaces raw adsk |
 |---|---|---|
-| user_params.ensure_params | ensure_params(design, spec, overwrite=True, prune=False) | `userParameters` |
+| user_params.ensure_params | ensure_params(design, spec, overwrite=True, prune=False). spec item = (expr, units, comment) or (expr, units, comment, SweepRange); the 4th item (min+max or values, no_geometry) is validated here and not written to Fusion | `userParameters` |
 | user_params.snapshot_geo | snapshot_geo(design) | `userParameters` |
 | user_params.eval_fresh | eval_fresh(design, expr, units) -> internal units (cm/rad). Derived user params re-evaluated from `.expression`, never stale `.value` (used by `sketch.mm`) | `evaluateExpression`, `userParameters` |
+| user_params.entry_fields | entry_fields(entry) -> (expression, units, comment) of a spec entry; 3 or 4 items, other lengths -> ValueError. Pure | |
+| user_params.entry_sweep | entry_sweep(entry) -> SweepRange (4th item, validated) or None. ValueError: unknown key, values with min/max, min without max, empty values. Pure | |
 
 ## view
 | helper | signature | replaces raw adsk |

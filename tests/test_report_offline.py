@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, call
 import pytest
 
 from fusion_kit import enums
-from fusion_kit.report import inside, inside_runs, interference, overhangs, world_bbox
+from fusion_kit.report import format_report, inside, inside_runs, interference, overhangs, report_data, world_bbox
 
 _FUS: Any = sys.modules["adsk.fusion"]
 _CORE: Any = sys.modules["adsk.core"]
@@ -377,3 +377,62 @@ def test_overhangs_mixed_part_flags_only_45_deg(cast_surface: None) -> None:
         _face(_geom("plane"), max_z_cm=1.0, point_z_cm=1.0, n_z=1.0),  # top
     ]
     assert _overhang_sig(overhangs(_part(faces))) == [("plane", -0.707)]
+
+
+# ---------------------------------------------------------------------------
+# report_data(): suppressed timeline features are not unhealthy
+# ---------------------------------------------------------------------------
+def _feature(name: str, *, health: Any, suppressed: bool) -> Any:
+    return SimpleNamespace(
+        name=name,
+        isGroup=False,
+        isSuppressed=suppressed,
+        healthState=health,
+        entity=SimpleNamespace(objectType="adsk::fusion::ExtrudeFeature"),
+    )
+
+
+@pytest.fixture
+def report_design() -> Iterator[Callable[[list[Any]], None]]:
+    """Design.cast -> fake timeline holding the given items. Restored afterwards."""
+
+    def install(items: list[Any]) -> None:
+        design = SimpleNamespace(
+            timeline=SimpleNamespace(count=len(items), item=lambda i: items[i]),
+            allComponents=[],
+        )
+        _FUS.Design.cast.side_effect = lambda _e: design
+
+    yield install
+    _FUS.Design.cast.side_effect = None
+
+
+def _empty_comp() -> Any:
+    return SimpleNamespace(
+        name="holder",
+        bRepBodies=_Coll([]),
+        sketches=SimpleNamespace(count=0, item=lambda i: None),
+    )
+
+
+def test_report_data_suppressed_error_feature_not_unhealthy(report_design: Callable[[list[Any]], None]) -> None:
+    error = _FUS.FeatureHealthStates.ErrorFeatureHealthState
+    report_design(
+        [
+            _feature("screw_hole_a", health=error, suppressed=True),  # suppressed + unhealthy state -> not counted
+            _feature("screw_hole_b", health=error, suppressed=False),  # real failure -> counted
+        ],
+    )
+    data = report_data(_empty_comp(), dfam=False)
+    assert (data.unhealthy, data.suppressed) == (1, 1)
+    assert "design_timeline_unhealthy=1 " in format_report(data)
+    assert " suppressed=1" in format_report(data)
+
+
+def test_report_data_all_suppressed_error_features_zero_unhealthy(report_design: Callable[[list[Any]], None]) -> None:
+    error = _FUS.FeatureHealthStates.ErrorFeatureHealthState
+    report_design(
+        [_feature(f"screw_hole_{k}", health=error, suppressed=True) for k in range(3)],
+    )
+    data = report_data(_empty_comp(), dfam=False)
+    assert (data.unhealthy, data.suppressed) == (0, 3)

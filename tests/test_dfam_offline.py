@@ -13,7 +13,7 @@ _HOLE_BASE = HoleFact(
     label="h",
     axis_vertical=False,
     radius_mm=2.0,
-    peak_mm=dfam.teardrop_peak_mm(2.0),
+    peak_mm=dfam.teardrop_required_peak_mm(2.0),
     has_seam_notch=True,
     on_bed=False,
     bed_step_unsupported=False,
@@ -69,8 +69,8 @@ def test_teardrop_peak_formula(r: float, deg: float, expected: float) -> None:
     assert dfam.teardrop_peak_mm(r, deg) == pytest.approx(expected, rel=1e-12)
 
 
-def test_teardrop_peak_60deg_factor() -> None:
-    assert dfam.teardrop_peak_mm(1.0) == pytest.approx(1.1547005, abs=1e-6)
+def test_teardrop_peak_45deg_factor() -> None:
+    assert dfam.teardrop_peak_mm(1.0) == pytest.approx(math.sqrt(2.0), abs=1e-12)
     assert dfam.teardrop_peak_mm(1.0) == dfam.teardrop_peak_mm(1.0, dfam.TEARDROP_WALL_DEG)
 
 
@@ -85,18 +85,60 @@ def test_horizontal_peak_none_fails_teardrop() -> None:
 
 
 def test_horizontal_peak_exact_passes() -> None:
-    assert dfam.check_holes([_hole(peak_mm=dfam.teardrop_peak_mm(2.0))]) == []
+    assert dfam.check_holes([_hole(peak_mm=dfam.teardrop_required_peak_mm(2.0))]) == []
 
 
 def test_horizontal_peak_97pct_fails_teardrop() -> None:
-    peak = dfam.teardrop_peak_mm(2.0) * 0.97
+    peak = dfam.teardrop_required_peak_mm(2.0) * 0.97
     assert _rules(dfam.check_holes([_hole(peak_mm=peak)])) == ["teardrop"]
 
 
 def test_horizontal_peak_98pct_boundary_passes() -> None:
     # rule is strict '<' against req * 0.98: exactly 0.98 * req is not a violation
-    peak = dfam.teardrop_peak_mm(2.0) * 0.98
+    peak = dfam.teardrop_required_peak_mm(2.0) * 0.98
     assert dfam.check_holes([_hole(peak_mm=peak)]) == []
+
+
+def test_required_peak_notch_up_to_8mm_diameter() -> None:
+    assert dfam.teardrop_required_peak_mm(2.25) == pytest.approx(2.65, abs=1e-12)  # d4.5: r + 0.4
+    assert dfam.teardrop_required_peak_mm(4.0) == pytest.approx(4.4, abs=1e-12)  # d8 still notch
+
+
+def test_required_peak_full_point_above_8mm_diameter() -> None:
+    assert dfam.teardrop_required_peak_mm(4.01) == pytest.approx(4.01 * math.sqrt(2.0), abs=1e-12)  # d8.02
+    assert dfam.teardrop_required_peak_mm(5.0) == pytest.approx(5.0 * math.sqrt(2.0), abs=1e-12)  # d10
+
+
+def test_required_peak_d18_full_point_when_notch_top_above_peak() -> None:
+    # d1.8: notch top r+0.4 = 1.3 > full peak r*sqrt2 = 1.273 -> required = full point; d2 still notch 1.4
+    assert dfam.teardrop_required_peak_mm(0.9) == pytest.approx(0.9 * math.sqrt(2.0), abs=1e-12)
+    assert dfam.teardrop_required_peak_mm(1.0) == pytest.approx(1.4, abs=1e-12)
+
+
+def test_full_point_d18_passes() -> None:
+    assert dfam.check_holes([_hole(radius_mm=0.9, peak_mm=0.9 * math.sqrt(2.0))]) == []
+
+
+def test_notch_d45_passes_at_r_plus_04() -> None:
+    assert dfam.check_holes([_hole(radius_mm=2.25, peak_mm=2.65)]) == []
+
+
+def test_notch_d45_old_2r_apex_fails_too_big() -> None:
+    # 60 deg cone on small hole: apex 2r = 4.5 > 1.5 * 2.65
+    assert _rules(dfam.check_holes([_hole(radius_mm=2.25, peak_mm=4.5)])) == ["teardrop"]
+
+
+def test_notch_within_1_5x_passes_just_above_fails() -> None:
+    assert dfam.check_holes([_hole(radius_mm=2.25, peak_mm=2.65 * 1.4)]) == []
+    assert _rules(dfam.check_holes([_hole(radius_mm=2.25, peak_mm=2.65 * 1.5 + 0.01)])) == ["teardrop"]
+
+
+def test_full_point_d10_r_sqrt2_passes() -> None:
+    assert dfam.check_holes([_hole(radius_mm=5.0, peak_mm=5.0 * math.sqrt(2.0))]) == []
+
+
+def test_full_point_d10_notch_peak_fails() -> None:
+    assert _rules(dfam.check_holes([_hole(radius_mm=5.0, peak_mm=5.4)])) == ["teardrop"]
 
 
 def test_vertical_hole_ignores_peak() -> None:
@@ -122,12 +164,12 @@ def test_vertical_with_seam_notch_passes() -> None:
     ],
 )
 def test_first_layer_min_diameter_on_bed(radius: float, expected: list[str]) -> None:
-    out = dfam.check_holes([_hole(on_bed=True, radius_mm=radius, peak_mm=dfam.teardrop_peak_mm(radius))])
+    out = dfam.check_holes([_hole(on_bed=True, radius_mm=radius, peak_mm=dfam.teardrop_required_peak_mm(radius))])
     assert _rules(out) == expected
 
 
 def test_first_layer_not_checked_off_bed() -> None:
-    out = dfam.check_holes([_hole(on_bed=False, radius_mm=0.5, peak_mm=dfam.teardrop_peak_mm(0.5))])
+    out = dfam.check_holes([_hole(on_bed=False, radius_mm=0.5, peak_mm=dfam.teardrop_required_peak_mm(0.5))])
     assert out == []
 
 

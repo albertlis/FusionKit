@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal
 
 from fusion_kit._vec import _cross, _dot, _norm, _scale, _sub, _unit
@@ -16,8 +17,11 @@ if TYPE_CHECKING:  # annotations only; runtime adsk import stays lazy inside fun
     import adsk.core
     import adsk.fusion
 
-TEARDROP_WALL_DEG = 60.0
-TEARDROP_TOL = 0.98  # peak may be 2% under the exact teardrop peak
+TEARDROP_WALL_DEG = 45.0  # full-point flank angle from vertical: peak = r / sin 45 = r * sqrt(2)
+TEARDROP_TOL = 0.98  # peak may be 2% under the required peak
+TEARDROP_NOTCH_MAX_D_MM = 8.0  # horizontal hole diameter <= this: flat-topped micro notch; above: full 45 deg point
+TEARDROP_NOTCH_MM = 0.4  # notch case: flat top sits this far above the circle top (peak = r + notch)
+TEARDROP_NOTCH_MAX_RATIO = 1.5  # notch case: measured peak above this x required = FAIL (full cone on small hole)
 SEAM_NOTCH_MM = 0.3
 BED_CHAMFER_MM = 1.0
 BED_CHAMFER_TOL_MM = 0.02  # bed_chamfer size tolerance on the larger leg (measurement noise)
@@ -31,7 +35,7 @@ BED_CHAMFER_ANGLE_DEG = (
 )
 WARP_SIDE_MM = 35.0
 WARP_GROOVE_WIDTH_MM = 0.8
-WARP_GROOVE_DEPTH_MM = 0.3
+WARP_GROOVE_DEPTH_MM = 0.6
 WARP_PITCH_MM = 30.0
 VERT_FILLET_MIN_MM = 3.0
 JOINT_CHAMFER_MM = 0.3
@@ -48,7 +52,9 @@ FIRST_LAYER_MIN_FEATURE_MM = 2.0
 SLENDER_RATIO = 4.0  # height / min footprint side above this -> WARN
 WARP_GAP_TOL = 0.25  # bed gap within this fraction of WARP_GROOVE_WIDTH_MM = one groove
 WARP_SLOT_ASPECT = 4.0  # inner loop longer than this x its width = slot-like (blind) groove
-WARP_EDGE_BAND_MM = 0.5  # height above bed within which a groove rim / ceiling counts as warp-groove geometry
+WARP_EDGE_BAND_MM = (
+    WARP_GROOVE_DEPTH_MM + 0.05
+)  # height above bed within which a groove rim / ceiling counts as warp-groove geometry (ceiling at depth + eps)
 WARP_EDGE_PAD_MM = 0.05  # footprint tolerance: rim edges sit exactly on the gap walls
 WARP_END_INSET_MAX_MM = (
     2.0  # recess-gap strip end within this of the body boundary extends to it (plate edge / bed chamfer zone)
@@ -58,6 +64,10 @@ WARP_BRIDGE_GAP_MAX_MM = (
 )  # collinear pieces on one groove line with gap <= this = groove crossing (1.0 mm + pads): bridged
 WARP_STRIP_OVERLAP_MIN_MM = 2.0  # two bed faces across a groove gap: shared interval along the groove >= this ...
 WARP_STRIP_OVERLAP_FRAC = 0.5  # ... and >= this x the shorter face span (unequal spans: dovetail tongue on one strip)
+WARP_STRIP_FULL_COVER_MIN_MM = (
+    0.5  # shared interval covers the whole shorter face (WARP_FULL_COVER_TOL_MM): floor drops to this
+)
+WARP_FULL_COVER_TOL_MM = 0.05  # overlap vs shorter face span tolerance for full cover
 SEAM_V_TOL_DEG = 10.0  # V notch = two hole-axis-parallel walls meeting at 90 +- this
 SEAM_V_COS_MAX = math.cos(math.radians(90.0 - SEAM_V_TOL_DEG))  # |n1 . n2| at or below this = 90 +- tol
 
@@ -126,16 +136,34 @@ def teardrop_peak_mm(r_mm: float, wall_deg: float = TEARDROP_WALL_DEG) -> float:
     return r_mm / math.sin(math.radians(wall_deg))
 
 
+def teardrop_notch(r_mm: float) -> bool:
+    return 2 * r_mm <= TEARDROP_NOTCH_MAX_D_MM
+
+
+def teardrop_required_peak_mm(r_mm: float) -> float:
+    """Required peak above centre, horizontal hole. d <= 8: min(r + 0.4, r * sqrt2); above: r * sqrt2."""
+    full = teardrop_peak_mm(r_mm)
+    if teardrop_notch(r_mm):
+        return min(r_mm + TEARDROP_NOTCH_MM, full)
+    return full
+
+
 def check_holes(holes: list[HoleFact]) -> list[Finding]:
     out: list[Finding] = []
     for h in holes:
         if not h.axis_vertical:
-            req = teardrop_peak_mm(h.radius_mm)
-            if h.peak_mm is None or h.peak_mm < req * TEARDROP_TOL:
+            req = teardrop_required_peak_mm(h.radius_mm)
+            notch = teardrop_notch(h.radius_mm)
+            low = h.peak_mm is None or h.peak_mm < req * TEARDROP_TOL
+            high = notch and h.peak_mm is not None and h.peak_mm > req * TEARDROP_NOTCH_MAX_RATIO
+            if low or high:
                 got = "none" if h.peak_mm is None else f"{h.peak_mm:.2f}"
+                cap = f" (notch, max {req * TEARDROP_NOTCH_MAX_RATIO:.2f})" if notch else ""
                 out.append(
                     Finding(
-                        "teardrop", "FAIL", f"{h.label} horizontal hole needs teardrop peak {req:.2f} mm, got {got}"
+                        "teardrop",
+                        "FAIL",
+                        f"{h.label} horizontal hole needs teardrop peak {req:.2f} mm{cap}, got {got}",
                     )
                 )
         elif not h.has_seam_notch:
@@ -645,11 +673,15 @@ def _normal(face: adsk.fusion.BRepFace, point: adsk.core.Point3D | None = None) 
     return _unit(_vec(face_normal(face, point)))
 
 
-def _adjacent(face: adsk.fusion.BRepFace) -> dict[int, adsk.fusion.BRepFace]:
-    """Distinct faces sharing an edge with face, keyed by entityToken."""
+def _adjacent(
+    face: adsk.fusion.BRepFace, edge_faces: dict[int, list[adsk.fusion.BRepFace]] | None = None
+) -> dict[int, adsk.fusion.BRepFace]:
+    """Distinct faces sharing an edge with face, keyed by tempId. edge_faces: tempId -> faces of that edge (cache built
+    once by facts_from_body); None or miss = read e.faces."""
     out: dict[int, adsk.fusion.BRepFace] = {}
     for e in face.edges:
-        for g in e.faces:
+        cached = edge_faces.get(e.tempId) if edge_faces is not None else None
+        for g in cached if cached is not None else e.faces:
             if g.tempId != face.tempId:
                 out[g.tempId] = g
     return out
@@ -709,68 +741,122 @@ def _bridge_collinear(grooves: list[tuple[int, GrooveRect]]) -> list[tuple[int, 
     """Merge collinear pieces until none merge. A bed gap across a perpendicular groove stops each piece at the
     crossing: the 0.8 mm gap between two pieces is that groove, so the merged rect covers the crossing squares.
     Body-edge ends are not touched here (_groove_rects end inset)."""
+    # Same result as restarting the lex-first pair scan after every merge (O(M^3)), but O(M^2): rows before the
+    # cursor i are already known non-mergeable, so after a merge only pairs touching the changed piece are rechecked.
     out = list(grooves)
-    found = True
-    while found:
-        found = False
-        for i in range(len(out)):
-            for j in range(i + 1, len(out)):
-                m = _merge_collinear(out[i], out[j])
-                if m is not None:
-                    out[i] = (out[i][0], m)
-                    del out[j]
-                    found = True
-                    break
-            if found:
+    i = 0
+    while i < len(out):
+        hit: tuple[int, GrooveRect] | None = None
+        for k in range(i):  # pairs (k, i), k < i: lex-before row i
+            m = _merge_collinear(out[k], out[i])
+            if m is not None:
+                hit = (k, m)
                 break
+        if hit is not None:
+            k, m = hit
+            out[k] = (out[k][0], m)
+            del out[i]
+            i = k
+            continue
+        for j in range(i + 1, len(out)):  # row i
+            m = _merge_collinear(out[i], out[j])
+            if m is not None:
+                out[i] = (out[i][0], m)
+                del out[j]
+                break
+        else:
+            i += 1
+    return out
+
+
+def _rot_box(lo: Vec, hi: Vec, axes: tuple[Vec, Vec, Vec]) -> tuple[Vec, Vec]:
+    """Axis-aligned box (mm) in a print frame: rotate_point of the 8 corners, min / max per axis (exact for 90 deg axes)."""
+    corners = [rotate_point((x, y, z), axes) for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])]
+    xs, ys, zs = zip(*corners)
+    return (min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs))
+
+
+def _frame_box(box: adsk.core.BoundingBox3D, axes: tuple[Vec, Vec, Vec] | None) -> tuple[Vec, Vec]:
+    """Fusion box (mm) in the given print frame; axes None = body frame."""
+    lo, hi = _box_mm(box)
+    return (lo, hi) if axes is None else _rot_box(lo, hi, axes)
+
+
+def _gap_pairs(boxes: list[tuple[Vec, Vec]]) -> list[tuple[int, int, int]]:
+    """Candidate (i, j, ax), i < j, for the recess-gap test of _groove_rects: exact superset, so the caller's predicate
+    decides. Gap test runs along the axis other than ax, so pairs are swept over boxes sorted by low edge on that axis:
+    a valid gap g <= WARP_GROOVE_WIDTH_MM * (1 + WARP_GAP_TOL) means the later box starts within g of the earlier box's
+    high edge, so the scan of each box stops at its high edge + that bound. O(B log B + candidate pairs);
+    worst case (all boxes overlapping along the sweep axis) stays O(B^2)."""
+    reach = WARP_GROOVE_WIDTH_MM * (1.0 + WARP_GAP_TOL) + 1e-9  # eps: float slack, the exact test still decides
+    out: list[tuple[int, int, int]] = []
+    for ax in (0, 1):
+        other = 1 - ax
+        order = sorted(range(len(boxes)), key=lambda k: boxes[k][0][other])
+        for p, i in enumerate(order):
+            top = boxes[i][1][other] + reach
+            for j in order[p + 1 :]:
+                if boxes[j][0][other] > top:
+                    break
+                out.append((min(i, j), max(i, j), ax))
     return out
 
 
 def _groove_rects(
-    bed: list[adsk.fusion.BRepFace], span_mm: tuple[Vec, Vec] | None = None
+    bed: list[adsk.fusion.BRepFace],
+    span_mm: tuple[Vec, Vec] | None = None,
+    axes: tuple[Vec, Vec, Vec] | None = None,
 ) -> list[tuple[int, GrooveRect]]:
     """Warp grooves on the bed as (groove direction 0=x / 1=y, footprint rect mm). Measured via _box_mm.
 
-    span_mm (body min, max, mm): recess-gap strip ends within WARP_END_INSET_MAX_MM of the body boundary extend to it.
+    axes (print frame, see bed_rotation_axes): measure the faces and span in that frame instead of the body frame;
+    the bed then sits on -Z there. None = body frame (bed -z / already print frame).
+    span_mm (body min, max, mm, in the same frame): recess-gap strip ends within WARP_END_INSET_MAX_MM of the body boundary extend to it.
     Bed faces stop at the bed chamfer / corner inset, but the groove ceiling runs out to the plate edge (live: ceiling
     x=0.773, strip end 1.062). Ends further in stay put: a collinear notch 10 mm past a strip end is not exempt.
 
     Two signals:
     - recess gap: two bed faces overlapping along one axis (shared interval >= max(WARP_STRIP_OVERLAP_MIN_MM,
-      WARP_STRIP_OVERLAP_FRAC x shorter span); spans may differ), separated by a gap ~WARP_GROOVE_WIDTH_MM
+      WARP_STRIP_OVERLAP_FRAC x shorter span, or WARP_STRIP_FULL_COVER_MIN_MM when the interval covers all of the shorter face); spans may differ), separated by a gap ~WARP_GROOVE_WIDTH_MM
       (through grooves split the bed face into strips). Rect = the gap, shared interval along the groove.
     - blind groove: inner loop of a bed face, slot-like (long > WARP_SLOT_ASPECT x short). Rect = loop bbox.
     A plain through hole (round inner loop, no gap) and a multi-foot bed (no gap) do not count.
     Collinear pieces split by a perpendicular groove (crossing gap <= WARP_BRIDGE_GAP_MAX_MM) are merged (_bridge_collinear).
     """
-    boxes = [_box_mm(f.boundingBox) for f in bed]
-    out: list[tuple[int, GrooveRect]] = []
-    for i, (alo, ahi) in enumerate(boxes):
-        for blo, bhi in boxes[i + 1 :]:
-            for ax in (0, 1):
-                # shared interval along the groove (equal spans = whole strip; unequal = overlap only)
-                lo, hi = max(alo[ax], blo[ax]), min(ahi[ax], bhi[ax])
-                shorter = min(ahi[ax] - alo[ax], bhi[ax] - blo[ax])
-                if hi - lo < max(WARP_STRIP_OVERLAP_MIN_MM, WARP_STRIP_OVERLAP_FRAC * shorter):
-                    continue
-                other = 1 - ax
-                gap = max(blo[other] - ahi[other], alo[other] - bhi[other])
-                if _is_groove_width(gap):
-                    rect = [0.0, 0.0, 0.0, 0.0]  # x0, y0, x1, y1
-                    rect[ax], rect[ax + 2] = lo, hi
-                    rect[other], rect[other + 2] = min(ahi[other], bhi[other]), max(alo[other], blo[other])
-                    if span_mm is not None:
-                        # strip end extends to the body boundary only within WARP_END_INSET_MAX_MM of it
-                        if rect[ax] - span_mm[0][ax] <= WARP_END_INSET_MAX_MM:
-                            rect[ax] = span_mm[0][ax]
-                        if span_mm[1][ax] - rect[ax + 2] <= WARP_END_INSET_MAX_MM:
-                            rect[ax + 2] = span_mm[1][ax]
-                    out.append((ax, (rect[0], rect[1], rect[2], rect[3])))
+    boxes = [_frame_box(f.boundingBox, axes) for f in bed]
+    hits: list[tuple[int, int, int, GrooveRect]] = []  # (i, j, ax, rect)
+    for i, j, ax in _gap_pairs(boxes):
+        (alo, ahi), (blo, bhi) = boxes[i], boxes[j]
+        # shared interval along the groove (equal spans = whole strip; unequal = overlap only)
+        lo, hi = max(alo[ax], blo[ax]), min(ahi[ax], bhi[ax])
+        shorter = min(ahi[ax] - alo[ax], bhi[ax] - blo[ax])
+        # full cover: shared interval == whole shorter face (narrow arm tip cut fully across by the groove).
+        # Only then the absolute floor drops to WARP_STRIP_FULL_COVER_MIN_MM; partial overlaps keep the 2 mm floor.
+        full_cover = abs((hi - lo) - shorter) <= WARP_FULL_COVER_TOL_MM
+        min_overlap = WARP_STRIP_FULL_COVER_MIN_MM if full_cover else WARP_STRIP_OVERLAP_MIN_MM
+        if hi - lo < max(min_overlap, WARP_STRIP_OVERLAP_FRAC * shorter):
+            continue
+        other = 1 - ax
+        gap = max(blo[other] - ahi[other], alo[other] - bhi[other])
+        if _is_groove_width(gap):
+            rect = [0.0, 0.0, 0.0, 0.0]  # x0, y0, x1, y1
+            rect[ax], rect[ax + 2] = lo, hi
+            rect[other], rect[other + 2] = min(ahi[other], bhi[other]), max(alo[other], blo[other])
+            if span_mm is not None:
+                # strip end extends to the body boundary only within WARP_END_INSET_MAX_MM of it
+                if rect[ax] - span_mm[0][ax] <= WARP_END_INSET_MAX_MM:
+                    rect[ax] = span_mm[0][ax]
+                if span_mm[1][ax] - rect[ax + 2] <= WARP_END_INSET_MAX_MM:
+                    rect[ax + 2] = span_mm[1][ax]
+            hits.append((i, j, ax, (rect[0], rect[1], rect[2], rect[3])))
+    # emit in (i, j, ax) order = the old all-pairs loop order; _bridge_collinear is order-sensitive
+    hits.sort(key=lambda h: h[:3])
+    out: list[tuple[int, GrooveRect]] = [(ax, rect) for _i, _j, ax, rect in hits]
     for f in bed:
         for lp in f.loops:
             if lp.isOuter:
                 continue
-            edge_boxes = [_box_mm(e.boundingBox) for e in lp.edges]
+            edge_boxes = [_frame_box(e.boundingBox, axes) for e in lp.edges]
             if not edge_boxes:
                 continue
             lo = tuple(min(b[0][k] for b in edge_boxes) for k in (0, 1))
@@ -780,7 +866,7 @@ def _groove_rects(
             if short > 0 and max(dx, dy) > WARP_SLOT_ASPECT * short:
                 out.append((0 if dx > dy else 1, (lo[0], lo[1], hi[0], hi[1])))
     # Groove ceiling (depth WARP_GROOVE_DEPTH_MM) runs past the bed-face bbox where the groove meets a bed chamfer
-    # (BED_CHAMFER_ANGLE_DEG face): horizontal run = depth / tan(angle) = 0.290 mm (live side_wall window ends:
+    # (BED_CHAMFER_ANGLE_DEG face): horizontal run = depth / tan(angle) = 0.579 mm at 0.6 (was 0.290 at 0.3; live side_wall window ends:
     # rect 11.03 -> ceiling 11.324, rect 27.30 -> ceiling 27.01). Applied after _bridge_collinear so merge gaps stay
     # unchanged; body-boundary ends stay on span_mm.
     ext = WARP_GROOVE_DEPTH_MM / math.tan(math.radians(BED_CHAMFER_ANGLE_DEG))
@@ -838,6 +924,49 @@ def in_warp_groove(point_mm: Vec, grooves: list[tuple[int, GrooveRect]], bed_z_m
     return any(in_groove_rect(point_mm, r, bed_z_mm) for _ax, r in _warp_family(grooves))
 
 
+WarpFrame = tuple[tuple[Vec, Vec, Vec], float, list[tuple[int, GrooveRect]]]  # (print-frame axes, bed z there, family)
+
+
+def warp_frames(
+    lo: Vec,
+    hi: Vec,
+    faces_of: dict[str, list[adsk.fusion.BRepFace]],
+    bed_grooves: list[tuple[int, GrooveRect]] | None = None,
+) -> list[WarpFrame]:
+    """Qualifying warp-groove family per print bed side, all six sides (grooves cut from a side face = secondary print
+    position, e.g. bed -x). faces_of[bed] = planar faces on that side, outward, body frame, mm (-z = bed faces).
+    Each side is measured in its own frame (bed_rotation_axes puts that side on -Z), so _groove_rects and
+    in_warp_groove run unchanged there. Sides without a qualifying family are dropped. lo / hi = body box, mm.
+    bed_grooves = _groove_rects(faces_of["-z"], (lo, hi)) already measured by the caller: the -z frame is the identity,
+    so it is reused instead of measured again. None = measure.
+    """
+    out: list[WarpFrame] = []
+    for bed in BED_DIRS:
+        faces = faces_of.get(bed)
+        if not faces:
+            continue
+        axes = bed_rotation_axes(bed)
+        r_lo, r_hi = _rot_box(lo, hi, axes)
+        if bed == "-z" and bed_grooves is not None:
+            fam = _warp_family(bed_grooves)
+        else:
+            fam = _warp_family(_groove_rects(faces, (r_lo, r_hi), axes))
+        if fam:
+            out.append((axes, r_lo[2], fam))
+    return out
+
+
+def in_warp_frames(point_mm: Vec, frames: list[WarpFrame]) -> bool:
+    """Groove predicate over all sides: point (body frame, mm) sits in the bed band of a qualifying family of any side.
+    Each side tests the point rotated into that side's print frame (in_warp_groove there). frames come from warp_frames,
+    so each fam is already qualifying: in_groove_rect per rect, no per-point _warp_family (same result, _warp_family is idempotent)."""
+    for axes, z, fam in frames:
+        p = rotate_point(point_mm, axes)
+        if any(in_groove_rect(p, r, z) for _ax, r in fam):
+            return True
+    return False
+
+
 def warp_family_mm(body: adsk.fusion.BRepBody) -> list[tuple[int, GrooveRect]]:
     """Qualifying warp-groove family for the printability exemption, mm. [] = no pattern.
 
@@ -893,12 +1022,24 @@ def facts_from_body(
 
     from fusion_kit.features import convex_edges, planar_faces
 
+    # One traversal per collection; every loop below reuses these lists (each Fusion collection read = item() calls).
+    body_faces = list(body.faces)
+    body_edges = list(body.edges)
+    face_source = SimpleNamespace(faces=body_faces)  # planar_faces reads only .faces
+    edge_faces = {
+        e.tempId: list(e.faces) for e in body_edges
+    }  # one e.faces read per edge, shared by _adjacent + edge loop
+    if tags is None:  # attrs read once per face (was 2 lookups per edge-face incidence); same sets _tagged reads
+        tags = {
+            name: frozenset(f.tempId for f in body_faces if _has_attr(f, name)) for name in (MATING_ATTR, GRIP_FIN_ATTR)
+        }
+
     lo, hi = _box_mm(body.boundingBox)
     dims = _sub(hi, lo)
     bed_z = lo[2]
     room_mm = min(dims)
 
-    bed = planar_faces(body, "z", bed_z, normal_sign=-1, tol_mm=BED_ON_TOL_MM)
+    bed = planar_faces(face_source, "z", bed_z, normal_sign=-1, tol_mm=BED_ON_TOL_MM)
     beds = [_box_mm(f.boundingBox) for f in bed]
     bed_max = (
         max(
@@ -910,11 +1051,18 @@ def facts_from_body(
     )
     grooves = _groove_rects(bed, (lo, hi))
     has_warp = _warp_grooves(grooves)
+    side_faces: dict[str, list[adsk.fusion.BRepFace]] = {"-z": bed}
+    for d in BED_DIRS[1:]:  # secondary print positions: groove families on the other five sides
+        a, sgn = bed_axis(d)
+        side_faces[d] = planar_faces(
+            face_source, "xyz"[a], (hi if sgn > 0 else lo)[a], normal_sign=sgn, tol_mm=BED_ON_TOL_MM
+        )
+    frames = warp_frames(lo, hi, side_faces, bed_grooves=grooves)
 
     holes: list[HoleFact] = []
     concave_axis: dict[int, Vec] = {}  # every concave cylinder (holes + fillets): seams skipped below
     concave: list[tuple[adsk.fusion.BRepFace, Vec, Vec, float]] = []  # (face, axis, origin, radius_mm)
-    for f in body.faces:
+    for f in body_faces:
         cyl = core.Cylinder.cast(f.geometry)
         if cyl is None:
             continue
@@ -943,7 +1091,7 @@ def facts_from_body(
         vertical = abs(ax[2]) > AXIS_PARALLEL
         adj: dict[int, adsk.fusion.BRepFace] = {}
         for f in faces:
-            for g in _adjacent(f).values():
+            for g in _adjacent(f, edge_faces).values():
                 if core.Plane.cast(g.geometry) is not None:
                     adj[g.tempId] = g
         adj_planar = list(adj.values())
@@ -976,8 +1124,8 @@ def facts_from_body(
 
     bed_tokens = {e.tempId for f in bed for lp in f.loops if lp.isOuter for e in lp.edges}
     rows: list[tuple[adsk.fusion.BRepEdge, EdgeKind, float | None, list[adsk.fusion.BRepFace]]] = []
-    for e in body.edges:
-        faces = list(e.faces)
+    for e in body_edges:
+        faces = edge_faces[e.tempId]
         if len(faces) != 2:
             continue
         linear = core.Line3D.cast(e.geometry) is not None
@@ -1052,7 +1200,7 @@ def facts_from_body(
                     leg = chamfer_leg_mm(width, n_g, _normal(adj_face, e.pointOnEdge))
                 treatment, size = "chamfer", leg
                 break
-        in_groove = in_warp_groove(m, grooves, bed_z)
+        in_groove = in_warp_frames(m, frames)
         on_fin = any(_tagged(g, GRIP_FIN_ATTR, tags) for g in faces)
         edge_facts.append(
             EdgeFact(
@@ -1158,6 +1306,36 @@ def _sig_close(a: FaceSig, b: FaceSig, tol: float) -> bool:
     return abs(aa - ba) <= tol and all(abs(ac[k] - bc[k]) <= tol for k in range(3))
 
 
+_CellKey = tuple[int, int, int, int]
+
+
+def _sig_cell(s: FaceSig, width: float) -> _CellKey:
+    (cx, cy, cz), area = s
+    return (math.floor(cx / width), math.floor(cy / width), math.floor(cz / width), math.floor(area / width))
+
+
+_CELL_NEIGHBOURS = [(a, b, c, d) for a in (-1, 0, 1) for b in (-1, 0, 1) for c in (-1, 0, 1) for d in (-1, 0, 1)]
+
+
+def _cell_index(sigs: list[FaceSig], width: float) -> dict[_CellKey, list[int]]:
+    out: dict[_CellKey, list[int]] = {}
+    for j, s in enumerate(sigs):
+        out.setdefault(_sig_cell(s, width), []).append(j)
+    return out
+
+
+def _close_to(s: FaceSig, sigs: list[FaceSig], index: dict[_CellKey, list[int]], width: float, tol: float) -> list[int]:
+    """Ascending j with _sig_close(s, sigs[j], tol). Scans the 3^4 neighbour cells of s only (same predicate, exact)."""
+    k = _sig_cell(s, width)
+    hits = [
+        j
+        for d in _CELL_NEIGHBOURS
+        for j in index.get((k[0] + d[0], k[1] + d[1], k[2] + d[2], k[3] + d[3]), [])
+        if _sig_close(s, sigs[j], tol)
+    ]
+    return sorted(hits)
+
+
 def match_faces(orig: list[FaceSig], copy: list[FaceSig], tol: float = SIG_TOL_CM) -> dict[int, int]:
     """Original face index -> copy face index, for faces whose signatures agree within tol. Pure.
 
@@ -1165,13 +1343,19 @@ def match_faces(orig: list[FaceSig], copy: list[FaceSig], tol: float = SIG_TOL_C
     within tol. A copy face matched by more than one original face is not mapped (ambiguous). Missing key = not mapped.
     """
 
+    if tol <= 0:
+        raise ValueError(f"match_faces: tol must be > 0, got {tol!r}")
+    width = 2.0 * tol  # |delta| <= tol moves a value at most half a cell: every close pair sits in neighbouring cells
+    copy_index = _cell_index(copy, width)
+    orig_index = _cell_index(orig, width)
+
     def unique(j: int) -> bool:
-        return sum(_sig_close(o, copy[j], tol) for o in orig) == 1
+        return len(_close_to(copy[j], orig, orig_index, width, tol)) == 1
 
     out: dict[int, int] = {}
     used: set[int] = set()
     for i, o in enumerate(orig):
-        cand = [j for j, c in enumerate(copy) if j not in used and _sig_close(o, c, tol)]
+        cand = [j for j in _close_to(o, copy, copy_index, width, tol) if j not in used]
         if i in cand and unique(i):
             j = i
         elif len(cand) == 1 and unique(cand[0]):
@@ -1222,7 +1406,8 @@ def print_frame_with_tags(
     mgr.transform(tmp, bed_to_minus_z_matrix(bed))
     rot = bed_rotation_axes(bed)
     orig_sigs: list[FaceSig] = []
-    for f in body.faces:
+    src = list(body.faces)
+    for f in src:
         c, a = _face_sig(f)
         orig_sigs.append((rotate_point(c, rot), a))
     pair = match_faces(orig_sigs, [_face_sig(f) for f in tmp.faces])
@@ -1232,7 +1417,7 @@ def print_frame_with_tags(
     unmapped: list[str] = []
     for name in (MATING_ATTR, GRIP_FIN_ATTR):
         ids: set[int] = set()
-        for i, f in enumerate(body.faces):
+        for i, f in enumerate(src):
             if not _has_attr(f, name):
                 continue
             if i in pair:

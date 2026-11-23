@@ -261,6 +261,7 @@ def test_non_positive_depth_rejected(recs: SimpleNamespace, sketch: MagicMock, d
 
 def test_cs_plane_omitted_raises_type_error(sketch: MagicMock) -> None:
     """cs_plane is required keyword-only: omitting it is a call-binding TypeError."""
+    kwargs: dict[str, Any] = {"depth_mm": 4.5, "label": "t_slot"}  # cs_plane deliberately absent
     with pytest.raises(TypeError, match="cs_plane"):
         holes.cut_screw_slot(
             MagicMock(name="comp"),
@@ -272,12 +273,12 @@ def test_cs_plane_omitted_raises_type_error(sketch: MagicMock) -> None:
             8.0,
             _body(),
             ("z", 0.0),
-            depth_mm=4.5,
-            label="t_slot",
+            **kwargs,
         )
 
 
 def test_cs_plane_explicit_none_raises(sketch: MagicMock) -> None:
+    none_plane: Any = None  # untyped None on purpose: runtime guard, not static type
     with pytest.raises(ValueError, match="cs_plane is required"):
         holes.cut_screw_slot(
             MagicMock(name="comp"),
@@ -290,7 +291,7 @@ def test_cs_plane_explicit_none_raises(sketch: MagicMock) -> None:
             _body(),
             ("z", 0.0),
             depth_mm=4.5,
-            cs_plane=None,
+            cs_plane=none_plane,
             label="t_slot",
         )
 
@@ -458,6 +459,33 @@ def test_teardrop_points_bad_radius_and_up_rejected() -> None:
         holes.teardrop_points(0.0, 0.0, 1.0, up=(0.0, 0.0))
 
 
+def test_teardrop_points_default_is_45deg_full_point() -> None:
+    peak, _, _ = holes.teardrop_points(0.0, 0.0, 2.0)
+    assert _dist(peak, (0.0, 0.0)) == pytest.approx(2.0 * math.sqrt(2.0), abs=1e-9)
+
+
+@pytest.mark.parametrize("r", [1.0, 2.0, 2.25, 4.0])
+def test_teardrop_flat_points_flat_top_tangent_flanks(r: float) -> None:
+    cx, cy = 3.0, -1.0
+    top_l, top_r, tan_r, tan_l = holes.teardrop_flat_points(cx, cy, r, up=(0.0, 1.0))
+    h = r + holes.TEARDROP_NOTCH_MM
+    assert top_l[1] == pytest.approx(cy + h, abs=1e-9) and top_r[1] == pytest.approx(cy + h, abs=1e-9)  # flat top
+    assert top_l[0] - cx == pytest.approx(-(top_r[0] - cx), abs=1e-9)  # symmetric about the hole axis
+    assert top_l[0] - cx == pytest.approx(r * math.sqrt(2.0) - h, abs=1e-9)  # corner half-width
+    for t in (tan_l, tan_r):
+        assert _dist(t, (cx, cy)) == pytest.approx(r, abs=1e-9)  # tangent point on circle
+    for corner, t in ((top_l, tan_l), (top_r, tan_r)):
+        dot = (corner[0] - t[0]) * (t[0] - cx) + (corner[1] - t[1]) * (t[1] - cy)
+        assert dot == pytest.approx(0.0, abs=1e-9)  # flank = tangent line at t (perp. to radius)
+
+
+def test_teardrop_flat_points_rejects_top_at_or_above_full_peak() -> None:
+    with pytest.raises(ValueError, match="top"):
+        holes.teardrop_flat_points(0.0, 0.0, 0.5)  # r 0.5: notch top 0.9 >= full 45 deg peak 0.707
+    with pytest.raises(ValueError, match="notch_mm"):
+        holes.teardrop_flat_points(0.0, 0.0, 1.0, notch_mm=0.0)
+
+
 @pytest.mark.parametrize("dir_deg", [0.0, 90.0, 200.0])
 def test_seam_notch_apex_sides_on_circle_and_90deg(dir_deg: float) -> None:
     cx, cy, r = 1.0, 2.0, 2.0
@@ -517,24 +545,63 @@ def seq(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, Any]]:
     return log
 
 
-def test_teardrop_hole_triangle_then_circle_then_cut(seq: list[tuple[str, Any]], sketch: MagicMock) -> None:
+def test_teardrop_hole_full_point_d10_triangle_then_circle_then_cut(
+    seq: list[tuple[str, Any]], sketch: MagicMock
+) -> None:
     body = _body()
     holes.teardrop_hole(
-        MagicMock(name="comp"), sketch, (0.0, 5.0, 0.0), 2.0, body, 4.0, label="t_drop"
-    )  # normal y: circle at x=0, y=5, z=0
+        MagicMock(name="comp"), sketch, (0.0, 5.0, 0.0), 5.0, body, 4.0, label="t_drop"
+    )  # normal y: circle at x=0, y=5, z=0; d10 > 8 -> full 45 deg point
     assert [name for name, _ in seq] == ["param_poly", "circle", "fix_point", "extrude"]
     pts = seq[0][1]
     assert len(pts) == 3 and all(isinstance(e, str) and e.endswith(" mm") for p in pts for e in p)
-    assert _num(pts[0][2]) == pytest.approx(2.0 / math.sin(math.radians(60.0)), abs=1e-4)  # apex on +Z
+    assert _num(pts[0][2]) == pytest.approx(5.0 * math.sqrt(2.0), abs=1e-4)  # apex on +Z, r * sqrt 2
     assert _num(pts[0][1]) == pytest.approx(5.0, abs=1e-9)  # plane y kept
     cx, cy, r, cz, diameter = seq[1][1]
-    assert (cx, cy, cz) == (0.0, 5.0, 0.0) and r == 2.0
-    assert _num(diameter) == pytest.approx(4.0, abs=1e-9)  # radius dimensioned, not free
+    assert (cx, cy, cz) == (0.0, 5.0, 0.0) and r == 5.0
+    assert _num(diameter) == pytest.approx(10.0, abs=1e-9)  # radius dimensioned, not free
     assert seq[2][1][0] == "csp"
     prof, dist, kw = seq[3][1]
     assert prof == sketch.profiles  # all sketch profiles cut
     assert dist.v == pytest.approx(4.0)  # symmetric depth = total length
     assert kw["op"] == "cut" and kw["symmetric"] is True and kw["bodies"] == [body] and kw["label"] == "t_drop"
+
+
+def test_teardrop_hole_notch_d4_flat_top_then_circle_then_cut(seq: list[tuple[str, Any]], sketch: MagicMock) -> None:
+    body = _body()
+    holes.teardrop_hole(MagicMock(name="comp"), sketch, (0.0, 5.0, 0.0), 2.0, body, 4.0, label="t_drop")
+    assert [name for name, _ in seq] == ["param_poly", "circle", "fix_point", "extrude"]
+    pts = seq[0][1]
+    assert len(pts) == 4 and all(isinstance(e, str) and e.endswith(" mm") for p in pts for e in p)
+    assert _num(pts[0][2]) == pytest.approx(2.4, abs=1e-6)  # flat top at r + 0.4 on +Z
+    assert _num(pts[1][2]) == pytest.approx(2.4, abs=1e-6)
+    assert _num(pts[0][0]) == pytest.approx(2.0 * math.sqrt(2.0) - 2.4, abs=1e-5)  # corner half-width
+    assert _num(pts[1][0]) == pytest.approx(-(2.0 * math.sqrt(2.0) - 2.4), abs=1e-5)
+    assert math.hypot(_num(pts[3][0]), _num(pts[3][2])) == pytest.approx(2.0, abs=1e-5)  # tangent point on circle
+    assert _num(pts[0][1]) == pytest.approx(5.0, abs=1e-9)  # plane y kept
+    _prof, _dist, kw = seq[3][1]
+    assert kw["op"] == "cut" and kw["label"] == "t_drop"
+
+
+@pytest.mark.parametrize(("d_mm", "top_mm"), [(2.0, 1.4), (3.0, 1.9)])
+def test_teardrop_hole_notch_d2_d3_flat_top_unchanged(
+    d_mm: float, top_mm: float, seq: list[tuple[str, Any]], sketch: MagicMock
+) -> None:
+    holes.teardrop_hole(MagicMock(name="comp"), sketch, (0.0, 5.0, 0.0), d_mm / 2, _body(), 4.0, label="t_drop")
+    pts = seq[0][1]
+    assert len(pts) == 4  # flat-topped notch kept
+    assert _num(pts[0][2]) == pytest.approx(top_mm, abs=1e-6)
+    assert _num(pts[1][2]) == pytest.approx(top_mm, abs=1e-6)
+
+
+def test_teardrop_hole_d18_full_point_no_raise(seq: list[tuple[str, Any]], sketch: MagicMock) -> None:
+    # d1.8: notch top r+0.4 = 1.3 would sit above full 45 deg peak r*sqrt2 = 1.273 -> full point, no ValueError
+    holes.teardrop_hole(MagicMock(name="comp"), sketch, (0.0, 5.0, 0.0), 0.9, _body(), 4.0, label="t_drop")
+    assert [name for name, _ in seq] == ["param_poly", "circle", "fix_point", "extrude"]
+    pts = seq[0][1]
+    assert len(pts) == 3
+    assert _num(pts[0][2]) == pytest.approx(0.9 * math.sqrt(2.0), abs=1e-5)  # apex on +Z, peak r*sqrt2
+    assert _num(pts[0][1]) == pytest.approx(5.0, abs=1e-9)  # plane y kept
 
 
 def test_teardrop_hole_bad_label_no_sketch_calls(seq: list[tuple[str, Any]], sketch: MagicMock) -> None:

@@ -9,6 +9,7 @@ Pure Python — no adsk import.
 
 import math
 import re
+from collections.abc import Mapping
 
 
 def _lit(v: float, unit: str) -> str:
@@ -146,9 +147,9 @@ def evaluate(expr: str, names: dict[str, float]) -> float:
     return float(eval(py, {"__builtins__": {}, "_DEG": math.pi / 180, **_FUNCS}, dict(names)))
 
 
-def derive(spec: dict[str, tuple[str, str, str]], names: dict[str, float]) -> dict[str, float]:
-    """Evaluate a params spec (name -> (expr, units, comment)) in order on top of names. Returns names + spec."""
+def derive(spec: Mapping[str, tuple[str, ...]], names: dict[str, float]) -> dict[str, float]:
+    """Evaluate a params spec (name -> (expr, units, comment[, sweep])) in order on top of names. Returns names + spec."""
     out = dict(names)
-    for name, (e, _, _) in spec.items():
-        out[name] = evaluate(e, out)
+    for name, entry in spec.items():
+        out[name] = evaluate(entry[0], out)
     return out

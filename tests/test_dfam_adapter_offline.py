@@ -298,7 +298,7 @@ def test_report_data_no_bodies_text(design_stub: None) -> None:
     assert data.vol_cm3 == 0.0
     assert rep_mod.format_report(data) == (
         "comp: bodies=0 lumps=0 bbox=no-bodies vol=0cm3 sketches=0/0 constrained "
-        "design_timeline_unhealthy=0 timeline_unnamed=0 timeline_numbered=0"
+        "design_timeline_unhealthy=0 timeline_unnamed=0 timeline_numbered=0 suppressed=0"
     )
 
 

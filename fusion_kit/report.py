@@ -1,12 +1,12 @@
 """Diagnostic report and measurement helpers for Fusion 360 scripts."""
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import adsk.core
 import adsk.fusion
 
-from fusion_kit import enums
+from fusion_kit import enums, sketch_quality
 from fusion_kit.dfam import Finding, dfam_check, summarize_findings
 from fusion_kit.features import collection, face_normal
 from fusion_kit.timeline import label_stats
@@ -36,6 +36,7 @@ def report(comp: adsk.fusion.Component, dfam: bool = True) -> str:
     Prints and returns the text (lines joined by "\\n") (docs/gotchas.md: end script with print() self-check).
     bbox is COMP-NATIVE coords (component's own frame, ignores occurrence transform). Moved/rotated occ -> use world_bbox(occ).
     design_timeline_unhealthy is design-wide, not comp-scoped. Timeline groups carry no health state -> skipped.
+    suppressed=N: timeline features with isSuppressed (intentional, e.g. disabled holes) -> counted there, NOT as unhealthy.
     """
     text = format_report(report_data(comp, dfam))
     print(text)
@@ -57,6 +58,8 @@ class ReportData:
     unnamed: int  # design-wide
     numbered: int  # design-wide
     findings: list[Finding] | None  # all bodies; None when dfam=False
+    suppressed: int = 0  # design-wide; isSuppressed timeline features, excluded from unhealthy
+    skq: list[str] = field(default_factory=list)  # SKQ_FAIL / SKQ_WARN lines over this comp's sketches
 
 
 def report_data(comp: adsk.fusion.Component, dfam: bool = True) -> ReportData:
@@ -78,13 +81,15 @@ def report_data(comp: adsk.fusion.Component, dfam: bool = True) -> ReportData:
     sk_total = sketches.count
     sk_constrained = sum(1 for i in range(sk_total) if sketches.item(i).isFullyConstrained)
 
-    # Groups skipped: UnknownFeatureHealthState, not a fault
+    # Groups skipped: UnknownFeatureHealthState, not a fault. Suppressed features skipped: intentional, not a fault.
     timeline = design.timeline
     items = [timeline.item(i) for i in range(timeline.count)]
+    features = [item for item in items if not item.isGroup]
+    suppressed = sum(1 for item in features if item.isSuppressed)
     unhealthy = sum(
         1
-        for item in items
-        if not item.isGroup and item.healthState != adsk.fusion.FeatureHealthStates.HealthyFeatureHealthState
+        for item in features
+        if not item.isSuppressed and item.healthState != adsk.fusion.FeatureHealthStates.HealthyFeatureHealthState
     )
 
     unnamed, numbered = label_stats(design)
@@ -101,6 +106,8 @@ def report_data(comp: adsk.fusion.Component, dfam: bool = True) -> ReportData:
         unnamed=unnamed,
         numbered=numbered,
         findings=findings,
+        suppressed=suppressed,
+        skq=sketch_quality.check_sketches(sketches),
     )
 
 
@@ -115,9 +122,10 @@ def format_report(data: ReportData) -> str:
     line = (
         f"{data.name}: bodies={data.bodies} lumps={data.lumps} bbox={bbox} vol={vol_str} "
         f"sketches={data.sketches_constrained}/{data.sketches_total} constrained design_timeline_unhealthy={data.unhealthy} "
-        f"timeline_unnamed={data.unnamed} timeline_numbered={data.numbered}"
+        f"timeline_unnamed={data.unnamed} timeline_numbered={data.numbered} suppressed={data.suppressed}"
     )
     lines = [line]
+    lines.extend(data.skq)
     if data.findings is not None:
         lines[0] = f"{line} {summarize_findings(data.findings)}"
         lines.extend(f.line() for f in data.findings)
