@@ -5,7 +5,11 @@ value into geometry at build. Editing that parameter in the Fusion dialog then d
 (docs/gotchas.md: parametric = live dialog edit).
 
 Flagged reads print `BUILD_ONLY_PARAM <name> <file>:<line>`. Not blocking (no DFAM_FAIL).
-Opt-out: `# param-lint: build-only <reason>` on the flagged line; the reason is required.
+Opt-out: `# param-lint: build-only <reason>` on the flagged line; the reason is its first word (leading punctuation
+skipped: `(selection)`, `- seed` work). Reasons `selection` (edge/face pick, not a value read) and `seed` (float only
+seeds initial sketch geometry that dims/fix_point then snap to the expression) always opt out. Any other reason opts
+out only for a param without a sweep range (4th item of its PARAMS spec, tuple or list, read from
+<entry dir>/parts/params.py; dict specs not read). Ranged param + other reason = BUILD_ONLY_PARAM finding.
 Pure: lint_source takes text. lint_entry reads the entry file and its parts/ package.
 
 Sketch-quality rules share the same API and output shape `<RULE> <name> <file>:<line>`. Not blocking.
@@ -24,7 +28,10 @@ from pathlib import Path
 _READ_FUNCS = frozenset({"mm", "eval_fresh"})  # sketch.mm / user_params.eval_fresh, bare or attribute call
 _UNIT_WORDS = frozenset({"mm", "cm", "m", "in", "ft", "deg", "rad"})
 _IDENT = re.compile(r"[A-Za-z_]\w*")
-_OPT_OUT = re.compile(r"#\s*param-lint:\s*build-only\s+\S")
+_OPT_OUT = re.compile(r"#\s*param-lint:\s*build-only\s+\W*(\w+)")  # group 1 = reason word, leading punctuation skipped
+_ALWAYS_OK = frozenset(
+    {"selection", "seed"}
+)  # reasons accepted on any param: edge/face pick; float seeding sketch geometry
 DYNAMIC = "<dynamic>"  # name when the argument is not a string literal
 BUILD_ONLY = "BUILD_ONLY_PARAM"
 _ARC_FUNCS = frozenset(
@@ -142,36 +149,74 @@ def _node_hits(node: ast.AST) -> list[tuple[str, str, int]]:
     return _sketch_hits(node)
 
 
-def _opted_out(text: str, rule: str) -> bool:
+def _opted_out(text: str, rule: str, name: str, ranged: frozenset[str]) -> bool:
     if rule == BUILD_ONLY:
-        return _OPT_OUT.search(text) is not None
+        found = _OPT_OUT.search(text)
+        if found is None:
+            return False
+        if found.group(1) in _ALWAYS_OK:
+            return True
+        names = name.split(",")
+        maybe_ranged = DYNAMIC in names or any(n in ranged for n in names)  # <dynamic>: may be a ranged param
+        return not maybe_ranged  # ranged or unknown name: reason must be `selection`
     return re.search(rf"#\s*sketch-lint:\s*{rule}\s+\S", text) is not None
 
 
-def lint_source(source: str, filename: str) -> list[LintHit]:
-    """Lint findings in one source text, opt-out lines removed (per rule). Sorted by line."""
+def _ranged_names(params_path: Path) -> frozenset[str]:
+    """PARAMS keys whose spec (tuple or list) has a 4th item (sweep range), read by ast (no adsk import). Dict specs not read. Missing file -> empty."""
+    if not params_path.is_file():
+        return frozenset()
+    tree = ast.parse(params_path.read_text(encoding="utf-8"), filename=str(params_path))
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign):
+            target, value = node.target, node.value
+        elif isinstance(node, ast.Assign):
+            target, value = node.targets[0], node.value
+        else:
+            continue
+        if not (isinstance(target, ast.Name) and target.id == "PARAMS" and isinstance(value, ast.Dict)):
+            continue
+        for key, spec in zip(value.keys, value.values):
+            if isinstance(key, ast.Constant) and isinstance(spec, ast.Tuple | ast.List) and len(spec.elts) >= 4:
+                names.add(str(key.value))
+    return frozenset(names)
+
+
+def lint_source(source: str, filename: str, ranged: frozenset[str] = frozenset()) -> list[LintHit]:
+    """Lint findings in one source text, opt-out lines removed (per rule). Sorted by line.
+
+    -> list[LintHit] sorted by line, 5 rules. BUILD_ONLY_PARAM: build-time user-param reads
+    (sketch.mm / eval_fresh / itemByName(...).value; string-literal names, unit words dropped); opt-
+    out `# param-lint: build-only <reason>`. Sketch rules, opt-out `# sketch-lint: <RULE> <reason>`
+    (reason required): SKETCH_ARC (arc built in sketch code -> 3D fillet), DIM_EXPR_MATH (dim /
+    .expression arithmetic -> constraint), FIX_POINT (isFixed = True or fixed_poly -> no fixed
+    points), THROUGH_GUESS (WARN: cut extrude literal distance, no through_all / to). Pure
+    """
     lines = source.splitlines()
     tree = ast.parse(source, filename=filename)
     hits: list[LintHit] = []
     for node in ast.walk(tree):
         for rule, name, line in _node_hits(node):
             text = lines[line - 1] if 0 < line <= len(lines) else ""
-            if _opted_out(text, rule):
+            if _opted_out(text, rule, name, ranged):
                 continue
             hits.append(LintHit(name=name, file=filename, line=line, rule=rule))
     return sorted(hits, key=lambda h: h.line)
 
 
 def lint_entry(entry_path: str) -> list[LintHit]:
-    """lint_source over the entry file and every .py under <entry dir>/parts/ (sorted). Missing file -> OSError."""
+    """lint_source over the entry file and every .py under <entry dir>/parts/ (sorted). Missing file -> OSError.
+    Opt-out: reasons `selection`/`seed` always; others only on params without sweep range."""
     entry = Path(entry_path)
     files = [entry]
     parts = entry.parent / "parts"
     if parts.is_dir():
         files.extend(sorted(parts.rglob("*.py")))
+    ranged = _ranged_names(parts / "params.py")
     hits: list[LintHit] = []
     for path in files:
-        hits.extend(lint_source(path.read_text(encoding="utf-8"), str(path)))
+        hits.extend(lint_source(path.read_text(encoding="utf-8"), str(path), ranged))
     return hits
 
 

@@ -14,7 +14,7 @@ from fusion_kit.dfam import TEARDROP_NOTCH_MAX_D_MM, TEARDROP_NOTCH_MM, TEARDROP
 from fusion_kit.enums import NEGATIVE_EXTENT
 from fusion_kit.expr import Ex
 from fusion_kit.features import _vi, collection, extrude, profiles, select_edges
-from fusion_kit.sketch import anchor, circle, fix_point, new_sketch, param_poly, to_sketch
+from fusion_kit.sketch import anchor, circle, fix_point, mm, model_axis_to_sketch, new_sketch, param_poly, to_sketch
 from fusion_kit.timeline import check_label, set_label
 
 Axis = Literal["x", "y", "z"]
@@ -361,6 +361,8 @@ def teardrop_flat_points(
     Flanks are the same tangent lines as teardrop_points (wall_deg from up); the full point is clipped flat at
     h = r_mm + notch_mm along up. Top corners at half-width (r - sin(wall) * h) / cos(wall). Needs r > sin(wall) * h,
     else the flat top reaches the full peak r / sin(wall) and ValueError.
+
+    → (top_l, top_r, tan_r, tan_l)
     """
     if r_mm <= 0 or notch_mm <= 0:
         raise ValueError(f"teardrop_flat_points: r_mm and notch_mm must be > 0, got {r_mm}, {notch_mm}")
@@ -462,6 +464,77 @@ def teardrop_hole(
     extrude(comp, profs, Ex.mm(depth_mm), op="cut", symmetric=True, bodies=[body], label=label)
 
 
+def _on_plane(centre: tuple[str, str, str], ai: int, bi: int, u: str, v: str) -> tuple[str, str, str]:
+    out = list(centre)  # normal coord kept = plane offset expression
+    out[ai], out[bi] = u, v
+    return out[0], out[1], out[2]
+
+
+def teardrop_hole_live(
+    comp: adsk.fusion.Component,
+    plane: adsk.fusion.ConstructionPlane,
+    centre: tuple[str, str, str],
+    r: str,
+    *,
+    label: str,
+    depth: str | None = None,
+    to: adsk.core.Base | None = None,
+    taper: str | None = None,
+    wall_deg: float = TEARDROP_WALL_DEG,
+    normal: Axis = "y",
+) -> adsk.fusion.ExtrudeFeature:
+    """Live teardrop hole: like teardrop_hole, but centre, radius and cut extent are expressions (editable in the dialog).
+
+    centre   : MODEL point expressions (x, y, z) of the circle centre. Only input needed.
+    r        : radius expression (diameter = 2 * r), required (keyword or 4th positional). No numeric radius needed.
+    Initial placement = centre evaluated fresh via mm() (eval_fresh). Final position always from the expressions.
+    depth    : one-sided cut length expression, XOR to = plane / face to cut up to. taper: optional, e.g. "-45 deg".
+    Always the full 45 deg point (peak r * sqrt2): passes dfam.teardrop_required_peak_mm for every d (d <= 8: full
+    point >= 0.98 * min(r + 0.4, r sqrt2) and <= 1.5 * that; d > 8: >= 0.98 * r sqrt2). One topology, so live edits
+    never change the profile. The flat-topped notch stays in teardrop_hole only.
+    Profile up = +v axis of the plane (normal "y" -> +Z, print up). wall_deg fixed per call, not live.
+    Sketch label f"{label}_sketch", cut label f"{label}_cut". Returns the ExtrudeFeature (seed for pattern_*).
+    """
+    check_label(label)
+    if (depth is None) == (to is None):
+        raise ValueError("teardrop_hole_live: give exactly one of depth (expression) or to (plane / face)")
+    centre_mm = (mm(centre[0]), mm(centre[1]), mm(centre[2]))  # initial placement, fresh eval (no stale cache)
+    _, ai, bi = _plane_axes(normal)
+    a = math.radians(wall_deg)
+    sa, ca = math.sin(a), math.cos(a)
+    big_r = f"({r})"
+    cu, cv = centre[ai], centre[bi]
+
+    verts = [
+        _on_plane(centre, ai, bi, cu, f"({cv} + {big_r} / {sa!r})"),  # peak
+        _on_plane(centre, ai, bi, f"({cu} + {ca!r} * {big_r})", f"({cv} + {sa!r} * {big_r})"),  # tan_l
+        _on_plane(centre, ai, bi, f"({cu} - {ca!r} * {big_r})", f"({cv} + {sa!r} * {big_r})"),  # tan_r
+    ]
+    sketch = new_sketch(comp, plane, label=f"{label}_sketch")
+    # Triangle first: param_poly deletes inferred constraints. Peak: u coord not dimmed, vertical/horizontal to the
+    # centre (1 dim: v). Flank tips: no dims, pinned by point-on-circle + tangent to the circle (tangent from the peak).
+    ku = model_axis_to_sketch(sketch, ai)
+    lines = param_poly(sketch, verts, skip_axes=[frozenset({ku}), frozenset({0, 1}), frozenset({0, 1})])
+    cx, cy, cz = centre_mm
+    # initial radius = r evaluated fresh (sketch.mm = eval_fresh): vertices are already at real size, circle must match or diameter dim over-constrains
+    c = circle(sketch, cx, cy, mm(r), z=cz, diameter=f"(2 * {big_r})")
+    fix_point(sketch, c.centerSketchPoint, centre)
+    gc = sketch.geometricConstraints
+    peak, tip_l, tip_r = lines[0].startSketchPoint, lines[0].endSketchPoint, lines[2].startSketchPoint
+    if ku == 0:
+        gc.addVerticalPoints(c.centerSketchPoint, peak)
+    else:
+        gc.addHorizontalPoints(c.centerSketchPoint, peak)
+    gc.addCoincident(tip_l, c)
+    gc.addTangent(lines[0], c)
+    gc.addCoincident(tip_r, c)
+    gc.addTangent(lines[2], c)
+    profs = profiles(sketch)
+    if not profs:
+        raise RuntimeError("teardrop_hole_live: sketch has no profiles")
+    return extrude(comp, profs, depth, op="cut", taper=taper, to=to, label=f"{label}_cut")
+
+
 def seam_notch(
     comp: adsk.fusion.Component,
     sketch: adsk.fusion.Sketch,
@@ -474,17 +547,61 @@ def seam_notch(
     notch_mm: float = 0.3,
     dir_deg: float = 90.0,
     normal: Axis = "y",
+    center_expr: tuple[str, str, str] | None = None,
+    r_expr: str | None = None,
+    notch_expr: str | None = None,
+    depth_expr: str | None = None,
 ) -> None:
     """90 deg V notch at the circle edge, cut symmetric depth_mm through body. Cut AFTER the hole: its cap
-    overlaps the hole void. Sketch must hold only this triangle: all sketch profiles are cut."""
+    overlaps the hole void. Sketch must hold only this triangle: all sketch profiles are cut.
+
+    *_expr (optional Fusion expressions, normally User Parameter names): center_expr = MODEL point (x, y, z) of the
+    circle centre, r_expr = radius, notch_expr = notch_mm. All three or none (mixed -> ValueError). Given -> sketch dims
+    are these expressions (live). Numeric args still drive validation/build values: pass them too. dir_deg literal;
+    depth_expr independent. None given = numeric path."""
     check_label(label)
     if depth_mm <= 0:
         raise ValueError(f"seam_notch: depth_mm must be > 0, got {depth_mm}")
     ni, ai, bi = _plane_axes(normal)
     cu, cv, w = center_mm[ai], center_mm[bi], center_mm[ni]
     pts = seam_notch_points(cu, cv, r_mm, notch_mm, dir_deg)
-    param_poly(sketch, [_pt_exprs(p, w, normal) for p in pts])
+    if center_expr is None and r_expr is None and notch_expr is None:
+        verts = [_pt_exprs(p, w, normal) for p in pts]
+    elif center_expr is not None and r_expr is not None and notch_expr is not None:
+        verts = _seam_notch_exprs(center_expr, r_expr, notch_expr, dir_deg, normal)
+    else:
+        raise ValueError("seam_notch: center_expr, r_expr and notch_expr must be given together or none")
+    param_poly(sketch, verts)
     profs = profiles(sketch)
     if not profs:
         raise RuntimeError("seam_notch: sketch has no profiles")
-    extrude(comp, profs, Ex.mm(depth_mm), op="cut", symmetric=True, bodies=[body], label=label)
+    dist = Ex.mm(depth_mm) if depth_expr is None else depth_expr
+    extrude(comp, profs, dist, op="cut", symmetric=True, bodies=[body], label=label)
+
+
+def _seam_notch_exprs(
+    centre: tuple[str, str, str], r: str, notch: str, dir_deg: float, normal: Axis
+) -> list[tuple[str, str, str]]:
+    """Expression twin of seam_notch_points: (apex, p1, p2) as MODEL expression triples; normal coord = centre's.
+    Same geometry as seam_notch_points: apex at R = r + notch along dir_deg, sides +-45 deg, t = R/sqrt2 - sqrt(r^2 - R^2/2).
+    sqrt needs unitless input: area term is divided by 1 mm, result multiplied back (same form as expr.abs_expr)."""
+    ni, ai, bi = _plane_axes(normal)
+    a = math.radians(dir_deg)
+    dx, dy = math.cos(a), math.sin(a)
+    big = f"({r} + {notch})"
+    rn, bn = f"(({r}) / 1 mm)", f"(({big}) / 1 mm)"
+    t = f"(({big}) / {math.sqrt(2):.12f} - sqrt({rn} * {rn} - {bn} * {bn} / 2) * 1 mm)"
+    apex_u = f"({centre[ai]} + {big} * {dx:.12f})"
+    apex_v = f"({centre[bi]} + {big} * {dy:.12f})"
+    c45 = math.cos(math.pi / 4)
+    s45 = math.sin(math.pi / 4)
+    sides: list[tuple[str, str]] = []
+    for sgn in (1.0, -1.0):
+        bx, by = -dx, -dy  # sides run inward from apex
+        sx, sy = bx * c45 - by * sgn * s45, bx * sgn * s45 + by * c45
+        sides.append((f"({apex_u} + {t} * {sx:.12f})", f"({apex_v} + {t} * {sy:.12f})"))
+
+    def at(u: str, v: str) -> tuple[str, str, str]:
+        return _on_plane(centre, ai, bi, u, v)
+
+    return [at(apex_u, apex_v), at(*sides[0]), at(*sides[1])]

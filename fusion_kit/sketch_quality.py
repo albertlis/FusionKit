@@ -106,7 +106,11 @@ Finding = tuple[str, str, str]  # (rule, level "FAIL" | "WARN", detail)
 
 
 def half_operand(expr: str) -> str | None:
-    """X when expr is exactly 'X / 2' (divisor 2 only: 2.5, 20, '2 * X', '+'/'-'/'*' in X -> None). Pure."""
+    """X when expr is exactly 'X / 2' (divisor 2 only: 2.5, 20, '2 * X', '+'/'-'/'*' in X -> None). Pure.
+
+    -> X when expr is exactly `X / 2` (divisor 2 only; 2.5, 20, `2*X`, operators in X -> None)
+    (expr_dim rule). Pure
+    """
     m = re.fullmatch(r"([^+\-*/()]+?)\s*/\s*2", expr.strip())
     operand = m.group(1).strip() if m else ""
     return operand or None
@@ -117,7 +121,11 @@ _MULT_NUM_FIRST = re.compile(r"(\d+)\s*\*\s*([A-Za-z_]\w*)")  # 2*pitch
 
 
 def pattern_multiple(expr: str) -> tuple[str, int] | None:
-    """(name, n) when expr is exactly `name*n` or `n*name` with integer n >= 2 (pattern_expr rule). Pure."""
+    """(name, n) when expr is exactly `name*n` or `n*name` with integer n >= 2 (pattern_expr rule). Pure.
+
+    -> (name, n) when expr is exactly `name*n` or `n*name` with integer n >= 2 (pattern_expr rule).
+    Pure
+    """
     text = expr.strip()
     m = _MULT_NAME_FIRST.fullmatch(text)
     if m:
@@ -297,7 +305,11 @@ RULES: frozenset[str] = frozenset(_RULE_FUNCS)
 
 def check_facts(f: SketchFacts, skip: dict[str, str] | None = None) -> list[str]:
     """SKQ lines for one sketch. skip = {rule: reason}: a skipped rule that fires -> one SKQ_WARN skq_skip line.
-    Unknown skip rule -> one SKQ_WARN skq_skip_unknown line, that rule ignored (never raises). Pure."""
+    Unknown skip rule -> one SKQ_WARN skq_skip_unknown line, that rule ignored (never raises). Pure.
+
+    -> SKQ_FAIL/SKQ_WARN lines for one SketchFacts; skip {rule: reason} -> SKQ_WARN skq_skip;
+    unknown rule -> SKQ_WARN skq_skip_unknown (ignored, never raises). Pure
+    """
     skip = skip or {}
     unknown = sorted(set(skip) - RULES)
     lines: list[str] = []
@@ -317,7 +329,10 @@ def check_facts(f: SketchFacts, skip: dict[str, str] | None = None) -> list[str]
 
 
 def skq_token(lines: list[str]) -> str:
-    """'<F>F/<W>W' count of SKQ_FAIL / SKQ_WARN lines (summary keyword value). Pure."""
+    """'<F>F/<W>W' count of SKQ_FAIL / SKQ_WARN lines (summary keyword value). Pure.
+
+    -> '<F>F/<W>W' (summary keyword value). Pure
+    """
     fails = sum(1 for line in lines if line.startswith("SKQ_FAIL "))
     warns = sum(1 for line in lines if line.startswith("SKQ_WARN "))
     return f"{fails}F/{warns}W"
@@ -345,7 +360,11 @@ def _tokens(obj: object, names: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def sketch_facts(sk: adsk.fusion.Sketch) -> SketchFacts:
-    """Read SketchFacts from a live sketch. Only Fusion reader in this module."""
+    """Read SketchFacts from a live sketch. Only Fusion reader in this module.
+
+    -> SketchFacts read from a live sketch (profiles, sketchCurves, sketchPoints,
+    geometricConstraints, sketchDimensions)
+    """
     in_profile: set[str] = set()
     for prof in _items(sk.profiles):
         for loop in _items(prof.profileLoops):
@@ -374,7 +393,11 @@ def sketch_facts(sk: adsk.fusion.Sketch) -> SketchFacts:
 def skip_of(sk: adsk.fusion.Sketch) -> tuple[dict[str, str], list[str]]:
     """skq_skip attribute -> ({rule: reason}, warn lines). Absent -> ({}, []). Malformed (no ':', empty rule or
     reason, rule given twice) -> ({}, [one SKQ_WARN skq_skip_malformed]); rules then run unskipped. Never raises.
-    Unknown rule -> SKQ_WARN skq_skip_unknown (check_facts)."""
+    Unknown rule -> SKQ_WARN skq_skip_unknown (check_facts).
+
+    -> ({rule: reason}, warn lines) from attribute ("skq", "skq_skip"); absent -> ({}, []);
+    malformed -> ({}, [SKQ_WARN skq_skip_malformed]), never raises
+    """
     attr = sk.attributes.itemByName(SKQ_GROUP, SKQ_SKIP_ATTR)
     if attr is None:
         return {}, []
@@ -390,7 +413,10 @@ def skip_of(sk: adsk.fusion.Sketch) -> tuple[dict[str, str], list[str]]:
 
 
 def check_sketches(sketches: _Coll[adsk.fusion.Sketch]) -> list[str]:
-    """SKQ lines over a sketches collection (one component's sketches for report())."""
+    """SKQ lines over a sketches collection (one component's sketches for report()).
+
+    -> SKQ lines over one collection of sketches (report() uses the comp's sketches)
+    """
     out: list[str] = []
     for sk in _items(sketches):
         skip, warns = skip_of(sk)
@@ -400,7 +426,10 @@ def check_sketches(sketches: _Coll[adsk.fusion.Sketch]) -> list[str]:
 
 
 def check(design: adsk.fusion.Design) -> list[str]:
-    """SKQ lines over all sketches of all components in the design."""
+    """SKQ lines over all sketches of all components in the design.
+
+    -> SKQ lines over all sketches of all components (build_check)
+    """
     out: list[str] = []
     for comp in _items(design.allComponents):
         out.extend(check_sketches(comp.sketches))

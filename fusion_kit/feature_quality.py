@@ -214,7 +214,14 @@ def _earlier_planes_mm(earlier: list[Entry], own_faces: set[str]) -> list[PlaneM
 # rules: one function per rule, returns detail text (mm) or None
 # ---------------------------------------------------------------------------
 def rule_extent_distance_matches_body(ent: Any, earlier: list[Entry]) -> str | None:
-    """One-side distance extrude whose end lies on an earlier face/plane -> to-object extent."""
+    """One-side distance extrude whose end lies on an earlier face/plane -> to-object extent.
+
+    -> detail or None. One-side Distance extrude whose end (either sign) lies within 0.01 mm of a
+    parallel plane of an earlier construction plane / body face -> use to= (ToEntityExtent). Plane-
+    level only, face extent not checked. Faces the feature itself created
+    (startFaces/endFaces/sideFaces, matched by entityToken) are ignored (own end cap); other faces
+    of the same body and other bodies count. Pure over duck-typed entities
+    """
     if _type(ent) != "ExtrudeFeature" or _is_two_sided(ent):
         return None
     dist = _signed_distance_mm(ent.extentOne)
@@ -227,7 +234,11 @@ def rule_extent_distance_matches_body(ent: Any, earlier: list[Entry]) -> str | N
 
 
 def rule_cut_blind_through(ent: Any, earlier: list[Entry]) -> str | None:
-    """Blind cut whose depth runs past the far side of the cut body -> through_all."""
+    """Blind cut whose depth runs past the far side of the cut body -> through_all.
+
+    -> detail or None. Cut Distance deeper than the far side of the feature's body bbox (sign from
+    distance) -> through_all. Pure
+    """
     if _type(ent) != "ExtrudeFeature" or _op(ent) != CUT_OPERATION or _is_two_sided(ent):
         return None
     dist = _signed_distance_mm(ent.extentOne)
@@ -243,7 +254,12 @@ def rule_cut_blind_through(ent: Any, earlier: list[Entry]) -> str | None:
 
 
 def rule_twin_extrudes(ent: Any, earlier: list[Entry]) -> str | None:
-    """Two one-side distance extrudes from the same profile in opposite directions -> symmetric / two sides."""
+    """Two one-side distance extrudes from the same profile in opposite directions -> symmetric / two sides.
+
+    -> detail or None. Two one-side Distance extrudes, same profile token set, opposite distance
+    sign -> symmetric / two sides. Direction is inferred from the distance sign only (no direction
+    property on ExtrudeFeature)
+    """
     if _type(ent) != "ExtrudeFeature" or _is_two_sided(ent):
         return None
     dist = _signed_distance_mm(ent.extentOne)
@@ -262,7 +278,11 @@ def rule_twin_extrudes(ent: Any, earlier: list[Entry]) -> str | None:
 
 
 def rule_hole_as_extrude(ent: Any, earlier: list[Entry]) -> str | None:
-    """Cut extrude of a single circle profile -> holes.hole_simple / holes.hole_counterbore."""
+    """Cut extrude of a single circle profile -> holes.hole_simple / holes.hole_counterbore.
+
+    -> detail or None. Cut extrude with one profile, one loop, one SketchCircle curve ->
+    holes.hole_simple / holes.hole_counterbore. Pure
+    """
     if _type(ent) != "ExtrudeFeature" or _op(ent) != CUT_OPERATION:
         return None
     loops = _profile_curves(ent)
@@ -306,7 +326,11 @@ def _has_midpoint_pair(mid_mm: float, offsets: list[float]) -> bool:
 
 
 def rule_plane_offset_expr(ent: Any, earlier: list[Entry]) -> str | None:
-    """Offset construction plane: expression halves a distance AND the plane lies midway between two reference planes."""
+    """Offset construction plane: expression halves a distance AND the plane lies midway between two reference planes.
+
+    -> detail or None. ConstructionPlane offset definition whose offset expression divides by
+    exactly 2 -> plane_midplane. Pure
+    """
     if _type(ent) != "ConstructionPlane":
         return None
     defn: Any = getattr(ent, "definition", None)
@@ -351,6 +375,10 @@ def rule_edge_by_edge(entries: list[Entry]) -> list[tuple[str, str]]:
     """Consecutive fillets / chamfers with the same expression -> one edge set + tangent chain.
 
     Returns (feature name, detail) for every member after the first of each run.
+
+    -> list[(feature name, detail)]. Consecutive single-edge-set fillets (ConstantRadius radius) or
+    chamfers (EqualDistance distance) with identical expression -> one edge set + tangent chain;
+    reports every member after the first of a run. Opt-out per member. Pure
     """
     keys = [_edge_key(ent) for _, ent in entries]
     hits: list[tuple[str, str]] = []
@@ -371,7 +399,11 @@ def _offset_wall(profile_tokens: list[str], offset_child_tokens: set[str]) -> bo
 
 
 def rule_thin_as_offset(ent: Any, earlier: list[Entry]) -> str | None:
-    """Solid extrude whose profile is drawn as offset curves -> thin extrude with thickness param."""
+    """Solid extrude whose profile is drawn as offset curves -> thin extrude with thickness param.
+
+    -> detail or None. Non-thin ExtrudeFeature whose profile holds >= 2 curves that are children of
+    an OffsetConstraint in its parent sketch -> thin extrude. Pure
+    """
     if _type(ent) != "ExtrudeFeature" or getattr(ent, "isThinExtrude", False) is True:
         return None
     tokens = [str(c.sketchEntity.entityToken) for loop in _profile_curves(ent) for c in loop]
@@ -399,7 +431,15 @@ SINGLE_RULES: tuple[tuple[str, SingleRule], ...] = (
 # live entry
 # ---------------------------------------------------------------------------
 def check(design: adsk.fusion.Design) -> list[str]:
-    """Feature-quality WARN lines over the design timeline (suppressed items and groups skipped)."""
+    """Feature-quality WARN lines over the design timeline (suppressed items and groups skipped).
+
+    -> list[str] — `SKQ_WARN <rule>: <feature> <detail>` lines over the timeline (groups and
+    suppressed items skipped; edge_by_edge run pass after the per-item rules). Rules:
+    extent_distance_matches_body, cut_blind_through, twin_extrudes, hole_as_extrude,
+    plane_offset_expr, edge_by_edge, thin_as_offset. Opt-out attr ("skq","skq_skip")
+    `<rule>:<reason>`. Features with a non-sketch (BRepFace) profile skipped. All WARN, blocks
+    nothing
+    """
     tl = design.timeline
     entries: list[Entry] = []
     for i in range(tl.count):

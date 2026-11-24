@@ -13,8 +13,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from fusion_kit import features
+from fusion_kit import features, features_bed
 from fusion_kit.dfam import bed_wall_ratio
+from fusion_kit.dfam_rules import bed_chamfer_feasible, check_edges
+from fusion_kit.dfam_types import EdgeFact
 from fusion_kit.expr import evaluate
 
 _CORE: Any = sys.modules["adsk.core"]
@@ -34,8 +36,8 @@ def _run(monkeypatch: pytest.MonkeyPatch, nzs: list[float], **kw: Any) -> tuple[
         f.faces = [_face(nz)]
         feats.append(f)
     comp.features.chamferFeatures.add.side_effect = feats
-    monkeypatch.setattr(features, "_bed_outer_edges", lambda _body, _only, _bed: [MagicMock(), MagicMock()])
-    monkeypatch.setattr(features, "_bed_dihedral_deg", lambda _e, _b: 90.0)
+    monkeypatch.setattr(features_bed, "_bed_outer_edges", lambda _body, _only, _bed: [MagicMock(), MagicMock()])
+    monkeypatch.setattr(features_bed, "_bed_dihedral_deg", lambda _e, _b: 90.0)
     features.bed_chamfer(comp, MagicMock(), "1 mm", label="bed_t", **kw)
     return comp, feats
 
@@ -79,7 +81,7 @@ def test_bed_chamfer_default_angle_is_46() -> None:
 def test_bed_chamfer_angle_outside_45_90_raises(monkeypatch: pytest.MonkeyPatch, angle: float) -> None:
     # 45: |n_z| 0.7071 fails the DfAM limit in both orientations. 30: wrong orientation (60 deg face) would pass |n_z|.
     comp: Any = MagicMock()
-    monkeypatch.setattr(features, "_bed_outer_edges", lambda _body, _only, _bed: [MagicMock()])
+    monkeypatch.setattr(features_bed, "_bed_outer_edges", lambda _body, _only, _bed: [MagicMock()])
     with pytest.raises(ValueError, match="angle_deg"):
         features.bed_chamfer(comp, MagicMock(), "1 mm", label="bed_t", angle_deg=angle)
     comp.features.chamferFeatures.createInput2.assert_not_called()
@@ -134,8 +136,8 @@ def test_square_ratio_on_dovetail_edge_gives_live_angle() -> None:
 def test_bed_chamfer_one_edge_set_per_dihedral_group(monkeypatch: pytest.MonkeyPatch) -> None:
     # 90 + 105 deg edges: one feature, one two-distance set per dihedral group, each with its own bed leg
     edges = [SimpleNamespace(phi=90.0), SimpleNamespace(phi=105.0), SimpleNamespace(phi=90.0)]
-    monkeypatch.setattr(features, "_bed_outer_edges", lambda _b, _o, _bed: edges)
-    monkeypatch.setattr(features, "_bed_dihedral_deg", lambda e, _b: e.phi)
+    monkeypatch.setattr(features_bed, "_bed_outer_edges", lambda _b, _o, _bed: edges)
+    monkeypatch.setattr(features_bed, "_bed_dihedral_deg", lambda e, _b: e.phi)
     comp: Any = MagicMock()
     feat = MagicMock()
     feat.faces = [_face(0.695)]  # every face at 46 deg from bed (default bed -z -> z axis)
@@ -186,9 +188,9 @@ def _window_body(monkeypatch: pytest.MonkeyPatch, inner_len_cm: float = 0.5) -> 
     body.faces = [_box_face(1.0, [outer, window]), _box_face(0.0, [hole])]
     # swap the module's adsk name, not adsk.core.Plane: patching the MagicMock stub leaves it without Plane after undo
     fake_adsk = SimpleNamespace(core=SimpleNamespace(Plane=_FakePlane, ValueInput=_CORE.ValueInput))
-    monkeypatch.setattr(features, "adsk", fake_adsk)
-    monkeypatch.setattr(features, "_bed_dihedral_deg", lambda e, _b: e.phi)
-    monkeypatch.setattr(features, "collection", lambda items: list(items))
+    monkeypatch.setattr(features_bed, "adsk", fake_adsk)
+    monkeypatch.setattr(features_bed, "_bed_dihedral_deg", lambda e, _b: e.phi)
+    monkeypatch.setattr(features_bed, "collection", lambda items: list(items))
     return body
 
 
@@ -216,3 +218,101 @@ def test_inner_loops_default_keeps_holes_sharp(monkeypatch: pytest.MonkeyPatch) 
 def test_inner_loops_honour_min_edge_mm(monkeypatch: pytest.MonkeyPatch) -> None:
     # window edges 2 mm < 3 mm -> dropped; outer edges 5 mm kept
     assert _window_sets(monkeypatch, inner_len_cm=0.2, inner_loops=True, min_edge_mm=3.0) == [["o1", "o2"]]
+
+
+def test_bed_chamfer_feasible_criterion() -> None:
+    assert not bed_chamfer_feasible(135.0, 46.0)  # denominator -0.0251: outer tip, no wall leg
+    assert bed_chamfer_feasible(90.0, 46.0)
+    assert bed_chamfer_feasible(105.0, 46.0)
+
+
+def _skip_run(
+    monkeypatch: pytest.MonkeyPatch, phis: list[float], capsys: pytest.CaptureFixture[str]
+) -> tuple[Any, str]:
+    """bed_chamfer over bed edges with the given dihedrals; returns (chamferEdgeSets mock, stdout)."""
+    edges = [SimpleNamespace(name=f"e{i}", phi=p) for i, p in enumerate(phis)]
+    monkeypatch.setattr(features_bed, "_bed_outer_edges", lambda _b, _o, _bed: edges)
+    monkeypatch.setattr(features_bed, "_bed_dihedral_deg", lambda e, _b: e.phi)
+    monkeypatch.setattr(features_bed, "collection", lambda items: list(items))
+    comp: Any = MagicMock()
+    feat = MagicMock()
+    feat.faces = [_face(0.695)]
+    comp.features.chamferFeatures.add.return_value = feat
+    features.bed_chamfer(comp, MagicMock(), "1 mm", label="bed_t")
+    return _sets(comp), capsys.readouterr().out
+
+
+def test_bed_chamfer_skips_135_deg_outer_tip(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # 135 edge skipped (one WARN-style print), 90 edge still chamfered
+    sets, out = _skip_run(monkeypatch, [135.0, 90.0], capsys)
+    assert sets.addTwoDistancesChamferEdgeSet.call_count == 1
+    assert [e.name for e in sets.addTwoDistancesChamferEdgeSet.call_args.args[0]] == ["e1"]
+    assert out.count("BED_CHAMFER_SKIP 1 edges (dihedral 135 deg)") == 1
+
+
+def test_bed_chamfer_mixed_outline_keeps_only_valid_groups(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sets, out = _skip_run(monkeypatch, [135.0, 90.0, 105.0, 135.0], capsys)
+    names = [[e.name for e in c.args[0]] for c in sets.addTwoDistancesChamferEdgeSet.call_args_list]
+    assert names == [["e1"], ["e2"]]  # sorted by dihedral: 90 then 105; both 135 tips dropped
+    assert "BED_CHAMFER_SKIP 2 edges (dihedral 135 deg)" in out
+
+
+def test_bed_chamfer_all_edges_skipped_raises(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(ValueError, match="every bed edge skipped"):
+        _skip_run(monkeypatch, [135.0, 135.0], capsys)
+
+
+def _sharp_bed(phi: float | None) -> EdgeFact:
+    return EdgeFact(label="e", kind="bed", treatment="sharp", size_mm=0.0, room_mm=10.0, length_mm=10.0, phi_deg=phi)
+
+
+def test_dfam_skipped_135_bed_edge_is_warn_not_fail() -> None:
+    assert [(f.rule, f.level) for f in check_edges([_sharp_bed(135.0)])] == [("bed_chamfer", "WARN")]
+
+
+def test_dfam_sharp_90_bed_edge_still_fails() -> None:
+    assert [(f.rule, f.level) for f in check_edges([_sharp_bed(90.0)])] == [("bed_chamfer", "FAIL")]
+
+
+def _angle_param(monkeypatch: pytest.MonkeyPatch, deg: float, seen: list[Any] | None = None) -> None:
+    """Stand-in for eval_fresh: angle_expr evaluates to `deg` (Fusion internal unit: rad)."""
+
+    def fake(design: Any, expr: str, units: str) -> float:
+        if seen is not None:
+            seen.append((design, expr, units))
+        return math.radians(deg)
+
+    monkeypatch.setattr(features_bed, "eval_fresh", fake)
+
+
+def test_bed_chamfer_angle_expr_in_timeline_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    # angle_expr (user param name) replaces the 46.0 literal in both expressions
+    _angle_param(monkeypatch, 46.0)
+    _CORE.ValueInput.createByString.reset_mock()
+    _run(monkeypatch, [0.695], angle_expr="bed_chamfer_angle")
+    exprs = [c.args[0] for c in _CORE.ValueInput.createByString.call_args_list]
+    assert exprs[0] == "(1 mm) * tan(90 deg - (bed_chamfer_angle))"
+    assert exprs[1] == "(1 mm) / (sin(90.0 deg) + cos(90.0 deg) * tan((bed_chamfer_angle)))"
+
+
+def test_bed_chamfer_angle_expr_evaluated_fresh_in_deg(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[Any] = []
+    _angle_param(monkeypatch, 46.0, seen)
+    comp, _ = _run(monkeypatch, [0.695], angle_expr="bed_chamfer_angle")
+    assert seen == [(comp.parentDesign, "bed_chamfer_angle", "deg")]
+
+
+def test_bed_chamfer_angle_expr_out_of_range_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    # evaluated float 44 fails the (45, 90) check before any chamfer feature is created
+    _angle_param(monkeypatch, 44.0)
+    comp: Any = MagicMock()
+    monkeypatch.setattr(features_bed, "_bed_outer_edges", lambda _b, _o, _bed: [MagicMock()])
+    with pytest.raises(ValueError, match="angle_deg"):
+        features.bed_chamfer(comp, MagicMock(), "1 mm", label="bed_t", angle_expr="bed_chamfer_angle")
+    comp.features.chamferFeatures.createInput2.assert_not_called()

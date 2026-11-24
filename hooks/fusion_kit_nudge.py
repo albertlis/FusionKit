@@ -1,9 +1,13 @@
-"""PreToolUse nudge (never blocks): raw adsk in Fusion part code -> fusion_kit helper.
+"""PreToolUse nudge + deny-once: raw adsk in Fusion part code -> fusion_kit helper.
 
 Targets: `mcp__autodesk-fusion__fusion_mcp_execute` and `mcp__fusion-cad__execute` (script text) and Write/Edit on
-`*/parts/*.py` (content / new_string). `parts/helpers.py` is exempt: raw adsk is the
+`*/parts/*.py` and mechanism entries `<pkg>/<pkg>.py` (content / new_string). `parts/helpers.py` is
+exempt: raw adsk is the
 documented escape there (CLAUDE.md). Source: docs/fusion_kit_api.md, rows
-`| helper | signature | replaces raw adsk |`, third cell = backticked raw tokens.
+`| helper | signature | replaces raw adsk |`, third cell = backticked raw tokens (dotted allowed).
+Token prefix `!` (`!addNewComponent`) = exact 1:1 replacement: first hit per (session, target, token) is a
+PreToolUse deny; the retry passes (nudge only). Plain token = additionalContext nudge, never denied.
+Nothing inside the FusionKit repo itself is denied (fusion_kit/ implements the helpers).
 Index lookup: CLAUDE_PLUGIN_ROOT first, then the repo this hook file sits in.
 Token found (word boundary) and its helper not already called in the same text ->
 one additionalContext block. Missing docs or any error -> silent exit 0.
@@ -12,6 +16,7 @@ one additionalContext block. Missing docs or any error -> silent exit 0.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -32,10 +37,15 @@ PARTS_GLOB = "*/parts/*.py"
 EXEMPT_NAME = "helpers.py"
 FK_PREFIX = "fusion_kit."
 TABLE_HEAD = ["helper", "signature", "replaces raw adsk"]
-TOKEN = re.compile(r"`([A-Za-z_]\w*)`")
+TOKEN = re.compile(r"`(!?[A-Za-z_][\w.]*)`")
+STRICT = "!"
 HELPER = re.compile(r"[A-Za-z_][\w.]*")
 DOCS_REL = Path("docs") / "fusion_kit_api.md"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_NORM = str(REPO_ROOT).replace("\\", "/").lower()
+MARK_PREFIX = "claude-fusion-nudge-deny-"
 HEADER = "FUSION_KIT: raw adsk in code, a helper exists in fusion_kit:"
+DENY_HEAD = "FUSION_KIT: raw adsk with an exact fusion_kit replacement. Use the helper; the retry passes."
 FOOTER = (
     "Index: docs/fusion_kit_api.md. No helper -> raw adsk in parts/helpers.py, then open a GitHub issue "
     "(gap template) at https://github.com/albertlis/FusionKit/issues"
@@ -48,13 +58,14 @@ def docs_candidates() -> list[Path]:
     root = os.environ.get("CLAUDE_PLUGIN_ROOT")
     if root:
         out.append(Path(root) / DOCS_REL)
-    out.append(Path(__file__).resolve().parent.parent / DOCS_REL)
+    out.append(REPO_ROOT / DOCS_REL)
     return out
 
 
-def parse_table(text: str) -> dict[str, list[str]]:
-    """raw adsk token -> helper names (fusion_kit. prefix stripped)."""
+def parse_index(text: str) -> tuple[dict[str, list[str]], frozenset[str]]:
+    """raw adsk token -> helper names (fusion_kit. prefix stripped), and the strict (`!`) tokens."""
     out: dict[str, list[str]] = {}
+    strict: set[str] = set()
     in_table = False
     for raw in text.splitlines():
         line = raw.strip()
@@ -72,21 +83,28 @@ def parse_table(text: str) -> dict[str, list[str]]:
         if name is None:
             continue
         helper = name.group(0).removeprefix(FK_PREFIX)
-        for token in TOKEN.findall(cells[2]):
+        for cell_token in TOKEN.findall(cells[2]):
+            token = cell_token.removeprefix(STRICT)
+            if cell_token.startswith(STRICT):
+                strict.add(token)
             helpers = out.setdefault(token, [])
             if helper not in helpers:
                 helpers.append(helper)
-    return out
+    return out, frozenset(strict)
 
 
-def load_table(paths: list[Path]) -> dict[str, list[str]] | None:
+def parse_table(text: str) -> dict[str, list[str]]:
+    return parse_index(text)[0]
+
+
+def load_index(paths: list[Path]) -> tuple[dict[str, list[str]], frozenset[str]] | None:
     for path in paths:
         try:
-            table = parse_table(path.read_text(encoding="utf-8"))
+            index = parse_index(path.read_text(encoding="utf-8"))
         except OSError:
             continue
-        if table:
-            return table
+        if index[0]:
+            return index
     return None
 
 
@@ -107,6 +125,15 @@ def hit_lines(text: str, table: dict[str, list[str]]) -> list[str]:
     return lines
 
 
+def strict_hits(text: str, table: dict[str, list[str]], strict: frozenset[str]) -> list[str]:
+    """Strict (`!`) tokens found in text with at least one helper not already called. Sorted."""
+    return [
+        t
+        for t in sorted(strict)
+        if re.search(rf"\b{re.escape(t)}\b", text) and any(not uses(text, h) for h in table[t])
+    ]
+
+
 def execute_script(tool_input: dict[str, object]) -> str | None:
     direct = tool_input.get("script")
     if isinstance(direct, str):
@@ -122,6 +149,15 @@ def execute_script(tool_input: dict[str, object]) -> str | None:
     return None
 
 
+def checked_path(norm: str) -> bool:
+    """Lowercase forward-slash path: parts/*.py except helpers.py, or mechanism entry <pkg>/<pkg>.py."""
+    if fnmatch.fnmatch(norm, PARTS_GLOB):
+        return norm.rsplit("/", 1)[-1] != EXEMPT_NAME
+    folder, _, name = norm.rpartition("/")
+    pkg = folder.rpartition("/")[2]
+    return bool(pkg) and name == f"{pkg}.py"
+
+
 def target_text(tool_name: str, tool_input: dict[str, object]) -> str | None:
     """Code to inspect: execute script, or new text of a parts/*.py write."""
     if tool_name in EXECUTE_TOOLS:
@@ -132,10 +168,27 @@ def target_text(tool_name: str, tool_input: dict[str, object]) -> str | None:
     if not isinstance(path, str):
         return None
     norm = path.replace("\\", "/").lower()
-    if not fnmatch.fnmatch(norm, PARTS_GLOB) or norm.rsplit("/", 1)[-1] == EXEMPT_NAME:
+    if not checked_path(norm):
         return None
     field = tool_input.get("content") if tool_name == "Write" else tool_input.get("new_string")
     return field if isinstance(field, str) else None
+
+
+def in_fk_repo(tool_name: str, tool_input: dict[str, object]) -> bool:
+    """File lives inside the FusionKit repo (fusion_kit/ implements the helpers): never denied."""
+    path = tool_input.get("file_path") if tool_name in EDIT_TOOLS else None
+    return isinstance(path, str) and path.replace("\\", "/").lower().startswith(REPO_NORM + "/")
+
+
+def target_key(tool_name: str, tool_input: dict[str, object]) -> str:
+    path = tool_input.get("file_path") if tool_name in EDIT_TOOLS else None
+    return path.replace("\\", "/").lower() if isinstance(path, str) else "execute"
+
+
+def marker_file(session: str, target: str, token: str, state_dir: Path) -> Path:
+    digest = hashlib.sha1(f"{target}|{token}".encode()).hexdigest()[:16]
+    safe = re.sub(r"[^\w-]", "_", session)[:120]
+    return state_dir / f"{MARK_PREFIX}{safe}-{digest}"
 
 
 def nudge(payload: dict[str, object], table: dict[str, list[str]]) -> str | None:
@@ -152,17 +205,54 @@ def nudge(payload: dict[str, object], table: dict[str, list[str]]) -> str | None
     return "\n".join([HEADER, *lines, FOOTER])
 
 
+def decide(
+    payload: dict[str, object], table: dict[str, list[str]], strict: frozenset[str], state_dir: Path
+) -> dict[str, object] | None:
+    """Hook output: deny once per (session, target, strict token) outside the FusionKit repo, else nudge, else None."""
+    tool_name = payload.get("tool_name")
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_name, str) or not isinstance(tool_input, dict):
+        return None
+    text = target_text(tool_name, tool_input)
+    if not text or not hit_lines(text, table):
+        return None
+    if not in_fk_repo(tool_name, tool_input):
+        session = str(payload.get("session_id") or "nosession")
+        target = target_key(tool_name, tool_input)
+        for token in strict_hits(text, table, strict):
+            marker = marker_file(session, target, token, state_dir)
+            if marker.exists():
+                continue
+            try:
+                marker.write_text("1", encoding="utf-8")
+            except OSError:
+                continue  # cannot remember the deny -> no deny, never deny in a loop
+            helpers = [FK_PREFIX + h for h in table[token] if not uses(text, h)]
+            reason = "\n".join([DENY_HEAD, f"- {token} → " + " / ".join(helpers), FOOTER])
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                }
+            }
+    msg = nudge(payload, table)
+    if msg is None:
+        return None
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": msg}}
+
+
 def main() -> int:
     try:
         payload: object = json.load(sys.stdin)
         if not isinstance(payload, dict):
             return 0
-        table = load_table(docs_candidates())
-        if table is None:
+        index = load_index(docs_candidates())
+        if index is None:
             return 0
-        msg = nudge(payload, table)
-        if msg is not None:
-            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": msg}}))
+        out = decide(payload, index[0], index[1], Path(tempfile.gettempdir()))
+        if out is not None:
+            print(json.dumps(out))
     except Exception:  # noqa: BLE001 - fail-open by design: never block a tool call
         return 0
     return 0
@@ -174,6 +264,9 @@ DOCS_TEXT = """# fusion_kit API
 |---|---|---|
 | report.inside | inside(body, point_mm) -> bool | `pointContainment` |
 | features.normal_at | normal_at(face, point) | `getNormalAtPoint`, `pointContainment` |
+| component.new_occ | new_occ(root, name) | `!addNewComponent` |
+| features.select_edges | select_edges(body) | `startVertex` |
+| dfam.facts_from_body | facts_from_body(body) | `Cylinder.cast` |
 | enums.Plane | enum | |
 | sketch.anchor | anchor(sk, corner, h, v) | `isFullyConstrained` |
 """
@@ -237,6 +330,18 @@ CASES: tuple[tuple[str, str, dict[str, object], list[str]], ...] = (
         [],
     ),
     (
+        "mechanism entry <pkg>/<pkg>.py hit",
+        "Write",
+        {"file_path": "C:/proj/my_pkg/my_pkg.py", "content": "f.getNormalAtPoint(p)"},
+        ["- getNormalAtPoint → fusion_kit.features.normal_at"],
+    ),
+    (
+        "other top-level py in package ignored",
+        "Write",
+        {"file_path": "C:/proj/my_pkg/other.py", "content": "f.getNormalAtPoint(p)"},
+        [],
+    ),
+    (
         "non-parts py ignored",
         "Write",
         {"file_path": "C:/proj/fusion_kit/features.py", "content": "pointContainment"},
@@ -244,6 +349,24 @@ CASES: tuple[tuple[str, str, dict[str, object], list[str]], ...] = (
     ),
     ("helpers.py exempt", "Write", {"file_path": "C:/proj/X/parts/helpers.py", "content": "pointContainment"}, []),
     ("other tool ignored", "Bash", {"command": "pointContainment"}, []),
+    (
+        "dotted token hit (was dropped by old token regex)",
+        EXECUTE,
+        {"script": "c = adsk.fusion.Cylinder.cast(f)"},
+        ["- Cylinder.cast → fusion_kit.dfam.facts_from_body"],
+    ),
+    (
+        "plain token hit (edge loop)",
+        EXECUTE,
+        {"script": "v = e.startVertex.geometry"},
+        ["- startVertex → fusion_kit.features.select_edges"],
+    ),
+    (
+        "strict token hit (execute) still nudge-listed",
+        EXECUTE,
+        {"script": "occ = root.occurrences.addNewComponent(m)"},
+        ["- addNewComponent → fusion_kit.component.new_occ"],
+    ),
 )
 
 
@@ -264,6 +387,13 @@ def run_main(
     )
 
 
+def _hso(out: dict[str, object] | None) -> dict[str, object]:
+    if out is None:
+        return {}
+    hso = out.get("hookSpecificOutput")
+    return hso if isinstance(hso, dict) else {}
+
+
 def selftest() -> int:
     results: list[tuple[str, bool, str]] = []
 
@@ -278,14 +408,80 @@ def selftest() -> int:
         bare_hook = Path(tmp) / "bare" / "hooks" / "fusion_kit_nudge.py"
         bare_hook.parent.mkdir(parents=True)
         shutil.copy(Path(__file__).resolve(), bare_hook)
-        table = parse_table(DOCS_TEXT)
+        table, strict = parse_index(DOCS_TEXT)
         check("table parsed", table.get("pointContainment") == ["report.inside", "features.normal_at"], ascii(table))
+        check("strict token parsed", strict == frozenset({"addNewComponent"}), ascii(strict))
         for name, tool, tool_input, expected in CASES:
             msg = nudge({"tool_name": tool, "tool_input": tool_input}, table)
             got = [] if msg is None else [ln for ln in msg.splitlines() if ln.startswith("- ")]
             check(name, got == expected, f"got {got!a}")
-        check("missing docs -> no table", load_table([Path(tmp) / "absent.md"]) is None)
-        check("real index parses", load_table([Path(__file__).resolve().parent.parent / DOCS_REL]) is not None)
+
+        state = Path(tmp) / "state"
+        state.mkdir()
+        parts_body = str(REPO_ROOT.parent / "Projektowanie3D" / "my_part" / "parts" / "body.py")
+        strict_write = {
+            "tool_name": "Write",
+            "session_id": "sel-deny-a",
+            "tool_input": {"file_path": parts_body, "content": "occ = root.occurrences.addNewComponent(m)"},
+        }
+        first = _hso(decide(strict_write, table, strict, state))
+        second = _hso(decide(strict_write, table, strict, state))
+        check(
+            "(a) strict Write parts -> deny first, retry allowed (nudge)",
+            first.get("permissionDecision") == "deny"
+            and "addNewComponent" in str(first.get("permissionDecisionReason", ""))
+            and second.get("permissionDecision") is None
+            and "additionalContext" in second,
+            f"first {ascii(first)[:160]} second {ascii(second)[:160]}",
+        )
+        other_session = {**strict_write, "session_id": "sel-deny-b"}
+        check(
+            "deny is per session: other session denied again",
+            _hso(decide(other_session, table, strict, state)).get("permissionDecision") == "deny",
+        )
+        other_file = {
+            **strict_write,
+            "session_id": "sel-deny-c",
+            "tool_input": {"file_path": parts_body + ".other.py", "content": "addNewComponent(m)"},
+        }
+        check(
+            "deny is per file: other file in same session denied",
+            _hso(decide(other_file, table, strict, state)).get("permissionDecision") == "deny",
+        )
+        plain = {
+            "tool_name": "Write",
+            "session_id": "sel-plain",
+            "tool_input": {"file_path": parts_body, "content": "v = e.startVertex.geometry"},
+        }
+        check(
+            "(b) plain token -> nudge, never deny",
+            _hso(decide(plain, table, strict, state)).get("permissionDecision") is None
+            and "additionalContext" in _hso(decide(plain, table, strict, state)),
+        )
+        in_repo = {
+            "tool_name": "Write",
+            "session_id": "sel-repo",
+            "tool_input": {
+                "file_path": str(REPO_ROOT / "fusion_kit" / "parts" / "x.py"),
+                "content": "occ = root.occurrences.addNewComponent(m)",
+            },
+        }
+        repo_hso = _hso(decide(in_repo, table, strict, state))
+        check(
+            "(c) file under FusionKit repo -> no deny (nudge only)",
+            repo_hso.get("permissionDecision") is None and "additionalContext" in repo_hso,
+            ascii(repo_hso)[:160],
+        )
+        check("missing docs -> no index", load_index([Path(tmp) / "absent.md"]) is None)
+        real = load_index([REPO_ROOT / DOCS_REL])
+        check(
+            "real index parses (strict addNewComponent, dotted Cylinder.cast)",
+            real is not None
+            and "addNewComponent" in real[1]
+            and "Cylinder.cast" in real[0]
+            and "startVertex" in real[0],
+            ascii(real)[:200],
+        )
         hit = json.dumps({"tool_name": EXECUTE, "tool_input": {"script": "b.pointContainment(p)"}})
         r = run_main(hit, plugin)
         hso: object = json.loads(r.stdout).get("hookSpecificOutput", {}) if r.stdout.strip() else {}
@@ -298,10 +494,38 @@ def selftest() -> int:
             and "permissionDecision" not in hso,
             ascii(r.stdout)[:200],
         )
-        r = run_main(hit, None, bare_hook)
-        check("e2e no index reachable -> silent", r.returncode == 0 and r.stdout.strip() == "", ascii(r.stdout)[:200])
         r = run_main("not json", plugin)
         check("e2e bad stdin -> silent", r.returncode == 0 and r.stdout.strip() == "", ascii(r.stdout)[:200])
+        r = run_main(hit, None, bare_hook)
+        check("e2e no index reachable -> silent", r.returncode == 0 and r.stdout.strip() == "", ascii(r.stdout)[:200])
+
+        sid = f"sel-e2e-{os.getpid()}"
+        e2e = json.dumps(
+            {
+                "tool_name": "Write",
+                "session_id": sid,
+                "tool_input": {"file_path": parts_body, "content": "root.occurrences.addNewComponent(m)"},
+            }
+        )
+        real_state = Path(tempfile.gettempdir())
+        marker = marker_file(sid, target_key("Write", {"file_path": parts_body}), "addNewComponent", real_state)
+        try:
+            r1 = run_main(e2e, plugin)
+            d1 = _hso(json.loads(r1.stdout)) if r1.stdout.strip() else {}
+            check(
+                "e2e first strict Write -> deny JSON",
+                r1.returncode == 0 and d1.get("permissionDecision") == "deny",
+                ascii(r1.stdout)[:200],
+            )
+            r2 = run_main(e2e, plugin)
+            d2 = _hso(json.loads(r2.stdout)) if r2.stdout.strip() else {}
+            check(
+                "e2e retry -> nudge, no deny",
+                r2.returncode == 0 and d2.get("permissionDecision") is None and "additionalContext" in d2,
+                ascii(r2.stdout)[:200],
+            )
+        finally:
+            marker.unlink(missing_ok=True)
 
     for name, ok, detail in results:
         print(f"PASS {name}" if ok else f"FAIL {name}: {detail}")

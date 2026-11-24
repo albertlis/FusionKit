@@ -9,9 +9,10 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
-from fusion_kit import holes
+import fusion_kit.sketch as fk_sketch
+from fusion_kit import dfam, holes
 from fusion_kit.enums import NEGATIVE_EXTENT, POSITIVE_EXTENT
-from fusion_kit.expr import Ex
+from fusion_kit.expr import Ex, evaluate
 
 _CORE: Any = sys.modules["adsk.core"]
 
@@ -526,7 +527,7 @@ def seq(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, Any]]:
 
     def fake_poly(s: Any, pts: Any, **kw: Any) -> list[Any]:
         log.append(("param_poly", pts))
-        return []
+        return [SimpleNamespace(startSketchPoint=f"s{i}", endSketchPoint=f"e{i}") for i in range(3)]  # tri lines
 
     def fake_circle(s: Any, x: float, y: float, r: float, z: float = 0.0, diameter: Any = None) -> Any:
         log.append(("circle", (x, y, r, z, diameter)))
@@ -617,6 +618,275 @@ def test_teardrop_hole_empty_sketch_raises(seq: list[tuple[str, Any]], sketch: M
     assert [name for name, _ in seq] == ["param_poly", "circle", "fix_point"]
 
 
+_LIVE_CENTRE = ("tear_cx", "tear_cy", "tear_cz")  # normal y: plane u = x, v = z, normal coord = y
+
+
+_LIVE_PARAMS: dict[str, float] = {}  # fake User Parameter values, set per call by _live_call
+
+
+@pytest.fixture
+def live_sketch(monkeypatch: pytest.MonkeyPatch, sketch: MagicMock, point3d_xyz: None) -> MagicMock:  # P3 numeric
+    monkeypatch.setattr(holes, "new_sketch", lambda comp, plane, *, label: sketch)
+    monkeypatch.setattr(
+        holes, "mm", lambda expr: evaluate(expr, _LIVE_PARAMS)
+    )  # fake sketch.mm (eval_fresh, no Fusion)
+    return sketch
+
+
+def _live_call(r_mm: float, **kw: Any) -> None:  # r_mm: fake tear_r value (_LIVE_PARAMS), builder takes the expr
+    _LIVE_PARAMS.update(tear_cx=0.0, tear_cy=5.0, tear_cz=0.0, tear_r=r_mm, tear_depth=4.0)
+    holes.teardrop_hole_live(
+        MagicMock(name="comp"),
+        MagicMock(name="plane"),
+        _LIVE_CENTRE,
+        "tear_r",
+        label="t_live",
+        **kw,
+    )
+
+
+def _live_verts(seq: list[tuple[str, Any]], r_mm: float) -> list[tuple[float, float, float]]:
+    env = {"tear_cx": 0.0, "tear_cy": 5.0, "tear_cz": 0.0, "tear_r": r_mm, "tear_depth": 4.0}
+    out: list[tuple[float, float, float]] = []
+    for p in seq[0][1]:
+        x, y, z = (float(eval(e, {"__builtins__": {}}, env)) for e in p)
+        out.append((x, y, z))
+    return out
+
+
+def test_teardrop_hole_live_dims_are_expressions(seq: list[tuple[str, Any]], live_sketch: MagicMock) -> None:
+    _live_call(1.5, depth="tear_depth")  # d3: full point, 3 vertices -> 3 vertex dims
+    assert [name for name, _ in seq] == ["param_poly", "circle", "fix_point", "extrude"]
+    pts = seq[0][1]
+    assert len(pts) == 3
+    for p in pts:
+        assert all("tear_" in e for e in p)  # every coordinate is a param expression, no bare floats
+        assert p[1] == "tear_cy"  # normal coord = centre expression
+    assert seq[1][1][4] == "(2 * (tear_r))"  # circle diameter = expression
+    assert seq[2][1][1] == _LIVE_CENTRE  # centre fixed by its expressions
+    _prof, dist, kw = seq[3][1]
+    assert dist == "tear_depth"
+    assert kw["op"] == "cut" and kw["label"] == "t_live_cut" and kw["taper"] is None and kw["to"] is None
+
+
+@pytest.mark.parametrize("d_mm", [2.0, 3.0, 8.0, 10.0])
+def test_teardrop_hole_live_peak_meets_dfam_rule(
+    d_mm: float, seq: list[tuple[str, Any]], live_sketch: MagicMock
+) -> None:
+    r = d_mm / 2
+    _live_call(r, depth="tear_depth")
+    verts = _live_verts(seq, r)
+    peak = max(v[2] for v in verts)  # plane v = z = up
+    required = dfam.teardrop_required_peak_mm(r)
+    assert peak >= dfam.TEARDROP_TOL * required  # real rule, no re-implementation
+    if d_mm <= dfam.TEARDROP_NOTCH_MAX_D_MM:
+        assert peak <= dfam.TEARDROP_NOTCH_MAX_RATIO * required  # notch cap, full point must pass it too
+    assert peak == pytest.approx(r * math.sqrt(2.0), abs=1e-9)  # always the full 45 deg point
+    for v in verts:
+        assert v[1] == pytest.approx(5.0, abs=1e-9)  # plane y kept
+
+
+def test_teardrop_hole_live_tangent_points_on_circle(seq: list[tuple[str, Any]], live_sketch: MagicMock) -> None:
+    for r in (1.5, 5.0):
+        seq.clear()
+        _live_call(r, depth="tear_depth")
+        tan_pts = _live_verts(seq, r)[-2:]
+        for x, _y, z in tan_pts:
+            assert math.hypot(x - 0.0, z - 0.0) == pytest.approx(r, abs=1e-9)  # tangent points sit on the circle
+
+
+def test_teardrop_hole_live_initial_circle_radius_is_evaluated_r(
+    seq: list[tuple[str, Any]], live_sketch: MagicMock
+) -> None:
+    for r in (1.5, 5.0):  # placeholder radius 1.0 fails both
+        seq.clear()
+        _live_call(r, depth="tear_depth")
+        assert seq[1][0] == "circle"
+        assert seq[1][1][2] == pytest.approx(r, abs=1e-9)  # initial circle = evaluated r; diameter expr sets final size
+
+
+def test_teardrop_hole_live_extent_passthrough(seq: list[tuple[str, Any]], live_sketch: MagicMock) -> None:
+    to_plane = MagicMock(name="outer_plane")
+    _live_call(2.0, to=to_plane, taper="-45 deg")  # countersink-style: up to plane, tapered
+    _prof, dist, kw = seq[3][1]
+    assert dist is None and kw["to"] is to_plane and kw["taper"] == "-45 deg"
+
+
+def test_teardrop_hole_live_needs_exactly_one_extent(seq: list[tuple[str, Any]], live_sketch: MagicMock) -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        _live_call(2.0)
+    with pytest.raises(ValueError, match="exactly one"):
+        _live_call(2.0, depth="tear_depth", to=MagicMock(name="plane"))
+    assert seq == []
+
+
+def test_teardrop_hole_live_bad_label_no_sketch_calls(seq: list[tuple[str, Any]]) -> None:
+    with pytest.raises(ValueError, match="snake_case"):
+        holes.teardrop_hole_live(
+            MagicMock(name="comp"),
+            MagicMock(name="plane"),
+            _LIVE_CENTRE,
+            "tear_r",
+            label="BadLabel",
+            depth="tear_depth",
+        )
+    assert seq == []
+
+
+def test_teardrop_hole_live_empty_sketch_raises(seq: list[tuple[str, Any]], live_sketch: MagicMock) -> None:
+    live_sketch.profiles = []
+    with pytest.raises(RuntimeError, match="no profiles"):
+        _live_call(2.0, depth="tear_depth")
+    assert [name for name, _ in seq] == ["param_poly", "circle", "fix_point"]
+
+
+def test_teardrop_hole_live_expr_only_centre_evaluated(seq: list[tuple[str, Any]], live_sketch: MagicMock) -> None:
+    # centre from expressions only: initial circle / vertices land on the evaluated centre expressions
+    _LIVE_PARAMS.update(tear_cx=3.0, tear_cy=7.0, tear_cz=-2.0, tear_r=1.5, tear_depth=4.0)
+    holes.teardrop_hole_live(
+        MagicMock(name="comp"), MagicMock(name="plane"), _LIVE_CENTRE, r="tear_r", label="t_live", depth="tear_depth"
+    )
+    assert [name for name, _ in seq] == ["param_poly", "circle", "fix_point", "extrude"]
+    cx, cy, r, cz, diameter = seq[1][1]
+    assert (cx, cy, cz) == pytest.approx((3.0, 7.0, -2.0), abs=1e-9)
+    assert r == pytest.approx(1.5, abs=1e-9)
+    assert diameter == "(2 * (tear_r))"
+    assert seq[2][1][1] == _LIVE_CENTRE
+    env = {"tear_cx": 3.0, "tear_cy": 7.0, "tear_cz": -2.0, "tear_r": 1.5, "tear_depth": 4.0}
+    peak = tuple(float(eval(e, {"__builtins__": {}}, env)) for e in seq[0][1][0])
+    assert peak == pytest.approx((3.0, 7.0, -2.0 + 1.5 * math.sqrt(2.0)), abs=1e-9)  # apex = centre + r*sqrt2 on +Z
+
+
+def test_teardrop_hole_live_needs_radius(seq: list[tuple[str, Any]], live_sketch: MagicMock) -> None:
+    with pytest.raises(TypeError, match="'r'"):  # r required positional-or-keyword: missing -> TypeError, no body run
+        holes.teardrop_hole_live(
+            MagicMock(name="comp"), MagicMock(name="plane"), _LIVE_CENTRE, label="t_live", depth="tear_depth"
+        )
+    assert seq == []
+
+
+class _TPoint:
+    """Fake SketchPoint, geometry in cm. move() refused: initial geometry is on the right side of every axis."""
+
+    def __init__(self, x: float, y: float) -> None:
+        self.geometry = SimpleNamespace(x=x, y=y, z=0.0)
+
+    def move(self, v: Any) -> bool:
+        raise AssertionError("no move expected")
+
+
+class _TCircle:
+    def __init__(self, centre: _TPoint) -> None:
+        self.centerSketchPoint = centre
+
+
+class _TParam:
+    def __init__(self, exprs: list[str]) -> None:
+        self._exprs = exprs
+
+    @property
+    def expression(self) -> str:
+        return ""
+
+    @expression.setter
+    def expression(self, v: str) -> None:
+        self._exprs.append(v)
+
+
+class _TLines:
+    def addByTwoPoints(self, a: Any, b: Any) -> Any:
+        sa = a if isinstance(a, _TPoint) else _TPoint(a.x, a.y)
+        sb = b if isinstance(b, _TPoint) else _TPoint(b.x, b.y)
+        return SimpleNamespace(startSketchPoint=sa, endSketchPoint=sb)
+
+
+class _TGC:
+    def __init__(self, s: "_TSketch") -> None:
+        self._s = s
+
+    def __iter__(self) -> Any:
+        return iter([])  # no drawing inference
+
+    def addCoincident(self, a: Any, b: Any) -> None:
+        self._s.dof += 1 if isinstance(b, _TCircle) else 2  # point on curve 1, point-point 2
+
+    def addTangent(self, a: Any, b: Any) -> None:
+        self._s.dof += 1
+
+    def addHorizontal(self, line: Any) -> None:
+        self._s.dof += 1
+
+    def addVertical(self, line: Any) -> None:
+        self._s.dof += 1
+
+    def addHorizontalPoints(self, a: Any, b: Any) -> None:
+        self._s.dof += 1
+
+    def addVerticalPoints(self, a: Any, b: Any) -> None:
+        self._s.dof += 1
+
+
+class _TDims:
+    def __init__(self, s: "_TSketch") -> None:
+        self._s = s
+
+    def addDistanceDimension(self, a: Any, b: Any, orientation: Any, pos: Any) -> Any:
+        self._s.dims += 1
+        self._s.dof += 1
+        return SimpleNamespace(parameter=_TParam(self._s.exprs))
+
+
+class _TSketch:
+    """Counts dims (+ bound exprs) and DOF removed by constraints. Sketch x = model x, y = model z, z = model y."""
+
+    def __init__(self) -> None:
+        self.dims = 0
+        self.exprs: list[str] = []
+        self.dof = 0
+        self.modelToSketchSpace = lambda p: SimpleNamespace(x=p.x, y=p.z, z=p.y)
+        self.originPoint = _TPoint(0.0, 0.0)
+        self.sketchCurves = SimpleNamespace(sketchLines=_TLines())
+        self.geometricConstraints = _TGC(self)
+        self.sketchDimensions = _TDims(self)
+
+
+def _t_circle(s: Any, x: float, y: float, r: float, z: float = 0.0, diameter: str | None = None) -> _TCircle:
+    c = fk_sketch.to_sketch(s, x, y, z)
+    s.dims += 1
+    s.dof += 1
+    s.exprs.append(str(diameter))
+    return _TCircle(_TPoint(c.x, c.y))
+
+
+def test_teardrop_live_fewer_dims_no_dup_expr(monkeypatch: pytest.MonkeyPatch, point3d_xyz: None) -> None:
+    # Before: 9 dims, tan_l z and tan_r z both "tear_cz + ..." (dup). After: peak v + centre x,y + diameter = 4 dims,
+    # tips pinned by 2 point-on-circle + 2 tangent, peak x by vertical to centre. DOF 9 = fully constrained.
+    # non-zero centre: a zero coord becomes an alignment constraint in _sketch_dims, not a dim
+    _LIVE_PARAMS.update(tear_cx=3.0, tear_cy=5.0, tear_cz=7.0, tear_r=1.5, tear_depth=4.0)
+
+    def ev(expr: str) -> float:
+        return evaluate(expr, _LIVE_PARAMS)
+
+    monkeypatch.setattr(fk_sketch, "mm", ev)
+    monkeypatch.setattr(holes, "mm", ev)
+    sk = _TSketch()
+    monkeypatch.setattr(holes, "new_sketch", lambda comp, plane, *, label: sk)
+    monkeypatch.setattr(holes, "circle", _t_circle)
+    monkeypatch.setattr(holes, "profiles", lambda s: [object()])
+    monkeypatch.setattr(holes, "extrude", lambda *a, **k: None)
+    holes.teardrop_hole_live(
+        MagicMock(name="comp"),
+        MagicMock(name="plane"),
+        _LIVE_CENTRE,
+        "tear_r",
+        label="t_live",
+        depth="tear_depth",
+    )
+    assert sk.dims < 9, f"dims {sk.dims}"
+    assert len(sk.exprs) == len(set(sk.exprs)), sk.exprs
+    assert sk.dof == 9, f"dof {sk.dof}"
+
+
 def test_seam_notch_triangle_then_cut(seq: list[tuple[str, Any]], sketch: MagicMock) -> None:
     body = _body()
     holes.seam_notch(MagicMock(name="comp"), sketch, (0.0, 0.0, 0.0), 2.0, body, 4.0, label="t_notch")
@@ -625,3 +895,66 @@ def test_seam_notch_triangle_then_cut(seq: list[tuple[str, Any]], sketch: MagicM
     assert apex == pytest.approx([0.0, 0.0, 2.3], abs=1e-6)
     _, dist, kw = seq[1][1]
     assert dist.v == pytest.approx(4.0) and kw["op"] == "cut" and kw["symmetric"] is True and kw["bodies"] == [body]
+
+
+def test_seam_notch_expr_dims_are_param_names(seq: list[tuple[str, Any]], sketch: MagicMock) -> None:
+    body = _body()
+    holes.seam_notch(
+        MagicMock(name="comp"),
+        sketch,
+        (0.0, 5.0, 0.0),
+        2.0,
+        body,
+        4.0,
+        label="t_notch",
+        center_expr=("sn_cx", "sn_cy", "sn_cz"),
+        r_expr="sn_r",
+        notch_expr="sn_n",
+        depth_expr="sn_d",
+    )
+    assert [name for name, _ in seq] == ["param_poly", "extrude"]
+    verts = seq[0][1]
+    assert len(verts) == 3
+    for v in verts:
+        assert v[1] == "sn_cy"  # normal y: plane offset is the centre expression, unchanged
+        assert "sn_r" in v[0] + v[2] and "sn_n" in v[0] + v[2]  # apex and sides all built from r and notch names
+    _, dist, kw = seq[1][1]
+    assert dist == "sn_d" and kw["op"] == "cut" and kw["symmetric"] is True
+
+
+def test_seam_notch_expr_matches_numeric_geometry(seq: list[tuple[str, Any]], sketch: MagicMock) -> None:
+    body = _body()
+    names = {"sn_cx": 0.0, "sn_cy": 5.0, "sn_cz": 0.0, "sn_r": 2.0, "sn_n": 0.3}
+    holes.seam_notch(
+        MagicMock(name="comp"),
+        sketch,
+        (0.0, 5.0, 0.0),
+        2.0,
+        body,
+        4.0,
+        label="t_notch",
+        center_expr=("sn_cx", "sn_cy", "sn_cz"),
+        r_expr="sn_r",
+        notch_expr="sn_n",
+    )
+    got = [tuple(evaluate(e, names) for e in v) for v in seq[0][1]]
+    apex, p1, p2 = holes.seam_notch_points(0.0, 0.0, 2.0, notch_mm=0.3, dir_deg=90.0)
+    want = [(apex[0], 5.0, apex[1]), (p1[0], 5.0, p1[1]), (p2[0], 5.0, p2[1])]
+    for g, w in zip(got, want):
+        assert g == pytest.approx(w, abs=1e-6)
+
+
+@pytest.mark.parametrize(
+    "partial",
+    [
+        {"center_expr": ("sn_cx", "sn_cy", "sn_cz")},
+        {"r_expr": "sn_r"},
+        {"notch_expr": "sn_n"},
+        {"center_expr": ("sn_cx", "sn_cy", "sn_cz"), "r_expr": "sn_r"},
+    ],
+    ids=["center_only", "r_only", "notch_only", "center_and_r"],
+)
+def test_seam_notch_mixed_expr_raises(partial: dict[str, Any], seq: list[tuple[str, Any]], sketch: MagicMock) -> None:
+    with pytest.raises(ValueError, match="together"):
+        holes.seam_notch(MagicMock(name="comp"), sketch, (0.0, 0.0, 0.0), 2.0, _body(), 4.0, label="t_notch", **partial)
+    assert seq == []

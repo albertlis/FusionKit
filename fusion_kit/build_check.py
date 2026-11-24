@@ -23,6 +23,7 @@ import adsk.core
 import adsk.fusion
 
 from fusion_kit import feature_quality, sketch_quality
+from fusion_kit.component import active_design
 from fusion_kit.dfam import dfam_check, summarize_findings
 from fusion_kit.loader import run_part
 from fusion_kit.param_lint import format_lint, lint_entry
@@ -122,6 +123,8 @@ def format_check(bodies: list[BodyCheck], summary: Summary) -> str:
     Summary line ends with ' sweep=<token>' when summary.sweep is set, ' skq=<token>' when set (or stage_states['skq']),
     ' budget=exceeded' when summary.budget_exceeded. sweep_lines (never capped: header + fails)
     and capped lint_lines follow the interference lines.
+
+    -> compact text from BodyCheck / Summary. Pure
     """
     out: list[str] = []
     for b in bodies:
@@ -258,6 +261,17 @@ def build_and_check(
         'SKIP <stage> budget' lines, token 'skipped', summary ends ' budget=exceeded'. None = no budget.
     Always: param_lint over entry + parts/ -> BUILD_ONLY_PARAM lines (static, not blocking). Entry file must exist.
     Components = unique by entityToken over root occurrences; multi-body comp -> lines 'name[i]'.
+
+    run_part(entry, "build") with stdout captured (printed only on error: last 20 lines, exception
+    re-raised) + report_data (dfam=False) + dfam + check_body per body (print_frames {comp name:
+    Rot}, default IDENTITY) + interference over root occurrences + param_sweep.sweep_params (params
+    = the PARAMS spec; sweep_combos = [{param: expr}] extra probes, run without params too;
+    sweep=none when params and sweep_combos omitted, sweep=off when sweep=False; print_frames passed
+    to the per-probe DfAM/print check; FAIL lines DFAM_FAIL param_sweep, block the Stop hook) +
+    param_lint.lint_entry over entry + parts/ (BUILD_ONLY_PARAM lines, not blocking) +
+    save_screenshot; SKQ lines = sketch_quality.check(design) (all components incl. root) +
+    feature_quality.check(design), summary skq=<F>F/<W>W; prints and returns compact keyword lines
+    (one per body, summary with sweep=<N>p/<F>F, max 3 detail lines per body)
     """
     unknown_checks = checks - ALL_CHECKS
     if unknown_checks:
@@ -269,9 +283,7 @@ def build_and_check(
         with _timed("build"):
             _run_build_quiet(entry_path)
         budget.done()
-        design = adsk.fusion.Design.cast(adsk.core.Application.get().activeProduct)
-        if design is None:
-            raise RuntimeError("build_check: no active Fusion design after build")
+        design = active_design()
         root = design.rootComponent
         occs = [root.occurrences.item(i) for i in range(root.occurrences.count)]
         comps: dict[str, adsk.fusion.Component] = {}

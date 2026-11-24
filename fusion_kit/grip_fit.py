@@ -59,6 +59,9 @@ def axis_frame(axis: str) -> tuple[int, int, int]:
     """(along, radial, tangential) coordinate indices (x=0, y=1, z=2) for a grip axis. Pure.
 
     Right-handed cycle: x -> (y, z), y -> (z, x), z -> (x, y). z is the old layout.
+
+    -> (along, radial, tangential) coordinate indices; x -> (0,1,2), y -> (1,2,0), z -> (2,0,1);
+    ValueError unless x/y/z. Pure
     """
     if axis not in AXES:
         raise ValueError(f"grip_fit: axis {axis!r} not in {AXES}")
@@ -67,7 +70,10 @@ def axis_frame(axis: str) -> tuple[int, int, int]:
 
 
 def default_entry(kind: GripKind) -> EntrySide:
-    """Old behaviour: hole entered at its low end (bed), shaft at its high end (peg tip). Pure."""
+    """Old behaviour: hole entered at its low end (bed), shaft at its high end (peg tip). Pure.
+
+    -> "low" (hole) / "high" (shaft). Pure
+    """
     if kind not in KINDS:
         raise ValueError(f"grip_fit: kind {kind!r} not in {KINDS}")
     return "low" if kind == "hole" else "high"
@@ -83,7 +89,10 @@ def _entry_side(kind: GripKind, entry: str | None) -> EntrySide:
 
 
 def model_point(axis: str, radial: str, tangential: str, along: str) -> tuple[str, str, str]:
-    """(x, y, z) model-coordinate expressions from radial / tangential / along-axis parts. Pure string assembly."""
+    """(x, y, z) model-coordinate expressions from radial / tangential / along-axis parts. Pure string assembly.
+
+    -> (x, y, z) model-coord expressions. Pure string assembly
+    """
     a, r, t = axis_frame(axis)
     out = [""] * 3
     out[a], out[r], out[t] = along, radial, tangential
@@ -104,6 +113,8 @@ def fin_corners(
     at the tip radius (the innermost point for hole, the outermost for shaft). Root corners sit at
     the lean-rotated root centre +/- half thickness.
     Angles are Fusion expressions ("45 deg"); lengths are mm expressions. Pure string assembly.
+
+    pure string assembly, (radial, tangential) mm expressions
     """
     if kind not in KINDS:
         raise ValueError(f"grip_fit: kind {kind!r} not in {KINDS}")
@@ -177,6 +188,10 @@ def fin_gap_mm(
     Band = fin radial extent in the relief zone: shaft [d/2 - relief, d/2 + interference (tip)], hole
     [d/2 - interference (tip), d/2 + relief]. Footprint widens outward (lean), so the gap is the MIN over the band,
     sampled at 41 radii (ends inset 0.02 mm). Gap at radius rho = rho * (2 pi / n - footprint angle). Pure.
+
+    -> min arc gap (mm) between neighbour fin footprints over the fin band in the relief zone (shaft
+    d/2-relief..d/2+interference, hole d/2-interference..d/2+relief; 41 samples); lean offset
+    included. Pure floats
     """
     if kind == "hole":
         band_lo, band_hi = diameter_mm / 2 - interference_mm, diameter_mm / 2 + relief_mm
@@ -211,6 +226,9 @@ def fin_footprint_rad(
     """(lo, hi) polar angle (rad, 0 = seed ray, + toward tangential) of the fin quad on the circle of radius rho_mm.
 
     Circle intersection with the quad (radial, tangential) edges; the single arc inside the quad. Pure.
+
+    -> (lo, hi) polar angle (rad, seed ray 0) of the fin quad on circle rho_mm; single arc, else
+    ValueError. Pure floats
     """
     quad = _fin_quad_mm(kind, diameter_mm, relief_mm, fin_thickness_mm, interference_mm, lean_rad)
     angles: list[float] = []
@@ -246,7 +264,10 @@ def max_fin_count(
     interference_mm: float,
     lean_rad: float,
 ) -> int:
-    """Largest fin count whose root footprints keep >= FIN_GAP_MM between neighbours at the relief radius. 0 if none. Pure."""
+    """Largest fin count whose root footprints keep >= FIN_GAP_MM between neighbours at the relief radius. 0 if none. Pure.
+
+    -> largest fin count with gap >= FIN_GAP_MM (0.4 mm); 0 if none. Pure floats
+    """
     best = 0
     n = 1
     while fin_gap_mm(n, kind, diameter_mm, relief_mm, fin_thickness_mm, interference_mm, lean_rad) >= FIN_GAP_MM:
@@ -307,6 +328,10 @@ def fin_section_min_mm(
     this band at the entry end). hole: [D/2 - i, D/2 - i + lead]; shaft: [D/2 + i - lead, D/2 + i]. 41 samples, ends
     inset min(0.02, span / 4). Lean 0 = rectangle, so the result is exactly fin_thickness. Pure floats.
     Feeds grip_fin_sliver (dfam): value < GRIP_FIN_SECTION_MIN_MM = knife edge at entry.
+
+    -> min tangential fin width (mm) over the lead-in radial band (tip .. lead-in outer radius; 41
+    samples, ends inset). Lean 0 = fin thickness. ValueError on bad kind / lead <= 0. Feeds dfam
+    grip_fin_sliver (< 0.4 mm). Pure floats
     """
     if kind not in KINDS:
         raise ValueError(f"grip_fit: kind {kind!r} not in {KINDS}")
@@ -338,6 +363,8 @@ def lead_in_corners(
     r_tip - lead_in (shaft, narrower at entry). The radial rule follows kind, not entry.
     Height H = lead_in + LEAD_IN_EXTRA_MM; z_far = z_entry + H (entry low) | z_entry - H (entry high).
     Cone slope: dz/dr = H/lead_in > 1 -> steeper than 45 deg from horizontal (no overhang fail in print).
+
+    pure string assembly, (radial, along) mm expressions of the lead-in triangle
     """
     if kind not in KINDS:
         raise ValueError(f"grip_fit: kind {kind!r} not in {KINDS}")
@@ -370,6 +397,9 @@ def lead_in_trims_body(lead_mm: float, interference_mm: float, relief_mm: float)
     pocket, below the fin entry ramp (fin_ramp_corners removes that band), so a revolve cut has no target body.
     Boundary (reach == relief) touches only a face -> False. Fin tips are clipped only at a higher lead threshold
     (test_lead_in_fin_clip_threshold_above_wall), so this guard decides the cut.
+
+    -> bool — True when lead > interference + relief (triangle reaches solid core/seat); grip_fit
+    creates the lead-in cut only then. Pure floats
     """
     return lead_mm > interference_mm + relief_mm
 
@@ -392,6 +422,11 @@ def fin_ramp_corners(
     hole : r_root = D/2 + relief + ROOT_OVERLAP_MM, r_end = D/2 - interference - FIN_RAMP_OVERCUT_MM.
     shaft: r_root = d/2 - relief - ROOT_OVERLAP_MM, r_end = d/2 + interference + FIN_RAMP_OVERCUT_MM.
     span = relief + ROOT_OVERLAP_MM + interference (same as fin_corners); e = FIN_RAMP_OVERCUT_MM.
+
+    pure string assembly, (radial, along) mm expressions of the fin entry ramp triangle: root
+    (r_root, z_e), overcut (r_end, z_e), cone end (r_end, z_e ± (span+0.2)·tan(FIN_RAMP_ANGLE=46
+    deg)); z_e = fin entry plane = entry face (low: start, high: start+depth); sign + low, − high;
+    hole r_root D/2+relief+0.6, r_end D/2-i-0.2; shaft r_root d/2-relief-0.6, r_end d/2+i+0.2
     """
     if kind not in KINDS:
         raise ValueError(f"grip_fit: kind {kind!r} not in {KINDS}")
@@ -432,6 +467,11 @@ def relief_profile_corners(
     shaft: groove r in [D/2 - relief, D/2 + SHAFT_CUT_OUTER_MM], roof rises from outer to core radius.
     No segment perpendicular to the axis past the open end (a flat ceiling is an unprintable overhang).
     Roof rise = (r_out - r_in) * tan(roof_angle) >= relief depth.
+
+    pure string assembly, (radial, along) mm expressions of the relief quad; entry high = mirror
+    (open end at start+depth, roof far end at start-rise): hole ring D/2..D/2+relief, shaft groove
+    d/2-relief..d/2+0.5; outer wall to start+depth, conical roof (tan(roof_angle)) rising inward to
+    D/2 (hole) / core (shaft); no flat ceiling
     """
     side = _entry_side(kind, entry)
     st = f"({as_str(start)})"
@@ -461,7 +501,12 @@ def relief_roof_rise(
     """Axial rise (mm expression) of the relief conical roof = (r_out - r_in) * tan(roof_angle), same constants as
     relief_profile_corners. Far end of the roof = start + depth + this (entry low) | start - this (entry high). Pure string assembly.
     Size a pocket from it, entry low: depth = wanted_roof_end - start - relief_roof_rise(...).
-    Entry high: start = wanted_roof_end + relief_roof_rise(...); depth = entry face - start."""
+    Entry high: start = wanted_roof_end + relief_roof_rise(...); depth = entry face - start.
+
+    -> mm expression of the conical roof rise (r_out - r_in) * tan(roof_angle), same constants as
+    relief_profile_corners. Far roof end = start + depth + rise (entry low) | start - rise (entry
+    high); size a pocket as depth = wanted_end - start - rise (low). Pure string assembly
+    """
     if kind not in KINDS:
         raise ValueError(f"grip_fit: kind {kind!r} not in {KINDS}")
     r_in, r_out = _relief_radii(kind, diameter, relief)
@@ -472,6 +517,8 @@ def fin_band_mm(kind: GripKind, diameter_mm: float, interference_mm: float, reli
     """Radial band (lo, hi) mm of fin side/tip faces: between tip radius and relief edge, +/- FIN_FACE_TOL_MM.
 
     hole: tip D/2-i, relief edge D/2+relief. shaft: tip D/2+i, relief edge D/2-relief. Plain floats (offline-testable).
+
+    -> (lo, hi) mm radial band of fin faces (tip..relief edge, +/-0.05). Pure floats
     """
     if kind not in KINDS:
         raise ValueError(f"grip_fit: kind {kind!r} not in {KINDS}")
@@ -496,6 +543,8 @@ def is_grip_fin_face(
     Tagged: parallel to axis (|n_axis| < 1e-3: fin side walls and tip face), radius in band, along-axis in zone.
     Not tagged here: faces normal to axis (|n_axis| ~ 1: top/bottom, incl. axial end caps: see is_grip_fin_end_face),
     bore / relief wall (cylinder), lead-in cone (not planar).
+
+    -> bool. Fin face tag rule (vertical, in band, in grip zone). Pure floats
     """
     lo, hi = band
     z_lo, z_hi = zone
@@ -513,6 +562,9 @@ def is_grip_fin_end_face(
     position in zone (+/- FIN_FACE_TOL_MM). The fin's far end cap meets the peg at a pin base edge: without this tag
     the edge has no grip_fin face and the pin_base_chamfer exemption (dfam on_grip_fin) never applies.
     Lead-in cone end is not planar: not matched. Sign of normal_axis ignored.
+
+    -> bool. Fin axial end cap tag rule (planar, normal along axis, in band, in zone +/-
+    FIN_FACE_TOL_MM). Far-end cap meets peg at pin_base edge. Pure floats
     """
     lo, hi = band
     z_lo, z_hi = zone
@@ -666,6 +718,18 @@ def grip_fit(
                lead_in + 0.5 mm <= depth. The cone is cut only when lead_in > interference + relief (lead_in_trims_body):
                below that it has no solid to trim and no lead-in feature is created. Decided at build time.
     label    : snake_case timeline prefix; steps get f"{label}_*" names.
+
+    (ValueError before Fusion if fin_count > max_fin_count; check skipped when an input is a user-
+    parameter name) relief revolve cut (trapezoid, 46 deg roof, no flat ceiling) + seed fin +
+    circular pattern + fin entry ramp revolve cut (fin bodies only, 46 deg cone, fin_ramp_corners) +
+    one join + lead-in revolve cut (tip trim at entry; zone = [start, start+depth] along axis; fin
+    span = full zone: entry low: start..start+depth+relief_roof_rise+0.05 mm (far end inside solid
+    above roof); entry high: start-relief_roof_rise-0.05..start+depth (entry face); writes body attr
+    dfam/grip_fin_min_section (fin_section_min_mm); entry low/high, default hole low, shaft high;
+    slope > 45 deg) + fin face tag (`DFAM_GROUP`/`GRIP_FIN_ATTR` from `fusion_kit.dfam`, planar
+    vertical faces in radial band); kind "hole" or "shaft" `extrudeFeatures`,
+    `circularPatternFeatures`, `combineFeatures`, `revolveFeatures` (lead-in), `attributes.add`
+    (tag, raw adsk)
     """
     check_label(label)
     corners = fin_corners(kind, diameter, interference, fin_thickness, relief, lean)  # ValueError before Fusion

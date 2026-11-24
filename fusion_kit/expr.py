@@ -153,3 +153,20 @@ def derive(spec: Mapping[str, tuple[str, ...]], names: dict[str, float]) -> dict
     for name, entry in spec.items():
         out[name] = evaluate(entry[0], out)
     return out
+
+
+def abs_expr(d: str) -> str:
+    """|d| as Fusion expression: sqrt(d/1 mm * d/1 mm) * 1 mm. Fusion has no abs(); same form as universal_holder."""
+    return f"(sqrt(({d}) / 1 mm * (({d}) / 1 mm)) * 1 mm)"
+
+
+def min_expr(a: str, b: str) -> str:
+    """min(a, b) = (a + b - |a - b|) / 2 as Fusion expression. Fusion rejects min() in User Parameters (gotchas)."""
+    d = abs_expr(f"({a}) - ({b})")
+    return f"((({a}) + ({b}) - {d}) / 2)"
+
+
+def max_expr(a: str, b: str) -> str:
+    """max(a, b) = (a + b + |a - b|) / 2 as Fusion expression. Fusion rejects max() in User Parameters (gotchas)."""
+    d = abs_expr(f"({a}) - ({b})")
+    return f"((({a}) + ({b}) + {d}) / 2)"

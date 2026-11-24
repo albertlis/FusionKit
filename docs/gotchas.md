@@ -9,6 +9,7 @@ Pitfalls for Autodesk Fusion API scripts (run through the Fusion MCP `execute` t
 - **User Parameter expressions reject `max()` and `min()`.** Symptom: `Expression is invalid.` Fix: compute the value in Python and write the result as a number or an expression without these functions.
 - **Expression `round()` is floor(x + 0.5).** Symptom: `round(2.5)` = 3, not banker's rounding. Fix: account for this when computing expected values.
 - **Live parameter change on profiles chosen in Python.** Cause: profiles picked by index from a Python filter are re-picked by index on rebuild, so Fusion selects different faces. Symptom: extrudes hit unintended faces (measured: clipped features came out unclipped and full-length, solid slabs appeared). Fix: do not change such parameters live; edit the parameter source and rebuild the whole part.
+- **`userParameters.itemByName(name)` returns null for an unknown name.** Symptom: `'NoneType' object has no attribute ...` on `.expression` / `.value`. Fix: check the name against the Parameters dialog; FusionKit `user_params` tests `is None` before use.
 - **Deleting a User Parameter that is still referenced fails.** Symptom: Fusion refuses the delete. Fix: delete the dependent feature or body first.
 - **Parametric = live dialog edit; Python reads of params are build-only.** Cause: `sketch.mm("name")`, `eval_fresh`, `itemByName(...).value`, and any `if` or `range` on those values freeze the value at build. Editing the parameter in the Parameters dialog then changes nothing (found by the user: print_orientation, end_stop_enabled). Edge values can also break the model (found by the user: bottom_flange_width = 1 mm, chamfers wider than the flange, failed features), and a count of 0 can cut with no target body (screw_hole_count = 0). Fix: pass expression strings to builders, and declare `min`/`max` (or `values`) as the 4th PARAMS item. `build_and_check(..., params=PARAMS)` then sweeps every declared range live (`DFAM_FAIL param_sweep`). `param_lint` reports `BUILD_ONLY_PARAM` reads; opt out only with `# param-lint: build-only <reason>`.
 
@@ -41,6 +42,7 @@ Pitfalls for Autodesk Fusion API scripts (run through the Fusion MCP `execute` t
 
 ## Bodies & geometry queries
 
+- **`BRepFace` has no `startVertex`; only `BRepEdge` does.** Symptom: `AttributeError` on a face. Fix: `edge.startVertex` / `edge.endVertex` for edge ends; `face.pointOnFace` for a point on the face. Stub check: `startVertex` on `BRepEdge` only (`adsk/fusion.py`).
 - **`bRepBodies.item(0)` is not the main body (measured: the back plate came first).** Fix: pass bodies by reference.
 - **`face.geometry.normal` ignores face orientation.** Symptom: floor normals point the wrong way. Fix: use `evaluator.getNormalAtPoint` or `features.face_normal`.
 - **`evaluator.parametricRange()` returns a `BoundingBox2D`, not a tuple.** Fix: read the box's min and max accessors.
@@ -74,5 +76,7 @@ Pitfalls for Autodesk Fusion API scripts (run through the Fusion MCP `execute` t
 ## Performance
 
 - **Slow build: time each step.** Fix: one execute per build step, timed with `time.perf_counter()`. Measured: expression-driven sketch dimensions take about 0.4 s each (64 dimensions took 46 s via `sketch.param_poly`). For code-picked or rebuild-only sketches, use `sketch.fixed_poly` and defer computation with `sketch.deferred` (`isComputeDeferred`).
+- **Slow build: read `TIME` / `STEP` lines, do not cProfile.** `build_and_check` prints `TIME build|dfam:<body>|check:<body>|interf|sweep|skq|total <s>` live, not in the returned text. `steps.run_steps` prints `STEP <name> <s> s` per step and `STEPS total <s> s`. Sweep prints `TIME probe:<name>=<expr> <s> cache_hits=N`.
+- **`sweep=True` is slow: done-gate only.** Each probe is a live `userParameters.itemByName(n).expression` edit plus measure. Keep `sweep=off` per build (`workflow.md`).
 - **Chamfer probes are expensive on heavy bodies.** Measured: each add-and-delete probe takes about 5 s. Fix: keep probe count low.
 - **Many `join` extrudes onto a heavy body push a build past 300 s.** Cause: each join recomputes all previous features. Fix: extrude each piece as a NewBody and join once at the end with `features.combine`.

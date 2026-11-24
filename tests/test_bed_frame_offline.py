@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from fusion_kit import dfam, features
+from fusion_kit import dfam, dfam_bed, dfam_body, features, features_axes, features_warp
 
 _CORE: Any = sys.modules["adsk.core"]
 _FUSION: Any = sys.modules["adsk.fusion"]
@@ -64,7 +64,7 @@ def _record_frames(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, Any]]:
         calls.append((origin, axes))
         return f"M{len(calls)}"
 
-    monkeypatch.setattr(dfam, "_frame_matrix", fake)
+    monkeypatch.setattr(dfam_bed, "_frame_matrix", fake)
     return calls
 
 
@@ -119,10 +119,12 @@ def test_dfam_check_tags_messages_on_non_z_bed(monkeypatch: pytest.MonkeyPatch) 
         facts_arg.append(b)
         return ("fact", [], [])
 
-    monkeypatch.setattr(dfam, "print_frame_with_tags", lambda b: (frame_body, {}, []))
-    monkeypatch.setattr(dfam, "facts_from_body", fake_facts)
-    monkeypatch.setattr(dfam, "check_all", lambda fact, holes, edges, skip: [dfam.Finding("bed_chamfer", "FAIL", "e")])
-    monkeypatch.setattr(dfam, "skip_from_body", lambda b: {})
+    monkeypatch.setattr(dfam_body, "print_frame_with_tags", lambda b: (frame_body, {}, []))
+    monkeypatch.setattr(dfam_body, "facts_from_body", fake_facts)
+    monkeypatch.setattr(
+        dfam_body, "check_all", lambda fact, holes, edges, skip: [dfam.Finding("bed_chamfer", "FAIL", "e")]
+    )
+    monkeypatch.setattr(dfam_body, "skip_from_body", lambda b: {})
     out = dfam.dfam_check(body)
     assert facts_arg == [frame_body]  # facts read from the print-frame body
     assert [f.msg for f in out] == ["e [print frame, bed +x]"]
@@ -131,9 +133,11 @@ def test_dfam_check_tags_messages_on_non_z_bed(monkeypatch: pytest.MonkeyPatch) 
 def test_dfam_check_plain_z_bed_untagged(monkeypatch: pytest.MonkeyPatch) -> None:
     body: Any = MagicMock()
     body.attributes.itemByName.return_value = None
-    monkeypatch.setattr(dfam, "facts_from_body", lambda b, tags=None: ("fact", [], []))
-    monkeypatch.setattr(dfam, "check_all", lambda fact, holes, edges, skip: [dfam.Finding("bed_chamfer", "FAIL", "e")])
-    monkeypatch.setattr(dfam, "skip_from_body", lambda b: {})
+    monkeypatch.setattr(dfam_body, "facts_from_body", lambda b, tags=None: ("fact", [], []))
+    monkeypatch.setattr(
+        dfam_body, "check_all", lambda fact, holes, edges, skip: [dfam.Finding("bed_chamfer", "FAIL", "e")]
+    )
+    monkeypatch.setattr(dfam_body, "skip_from_body", lambda b: {})
     assert [f.msg for f in dfam.dfam_check(body)] == ["e"]
 
 
@@ -147,8 +151,8 @@ def test_seed_rect_plus_x_passes_model_points(monkeypatch: pytest.MonkeyPatch) -
         return lines
 
     fix = MagicMock(name="fix_point")
-    monkeypatch.setattr(features, "rect", fake_rect)
-    monkeypatch.setattr(features, "fix_point", fix)
+    monkeypatch.setattr(features_warp, "rect", fake_rect)
+    monkeypatch.setattr(features_warp, "fix_point", fix)
     features._seed_rect(MagicMock(name="sketch"), 19.6, -1.0, 20.4, 36.0, bed_dir="+x", bed_mm=7.0)
     assert rect_args == [((7.0, 19.6, -1.0), (7.0, 20.4, 36.0))]
     near, far = fix.call_args_list
@@ -173,20 +177,20 @@ def _plate_body() -> Any:
 def _family(monkeypatch: pytest.MonkeyPatch, **kw: Any) -> tuple[MagicMock, list[tuple[Any, ...]], list[str]]:
     direction = SimpleNamespace(x=0.0, y=1.0, z=0.0)
     axis = SimpleNamespace(geometry=SimpleNamespace(direction=direction))
-    monkeypatch.setattr(features, "axis_y_through", lambda comp, **kwargs: axis)
-    monkeypatch.setattr(features, "new_sketch", lambda comp, plane, *, label: SimpleNamespace(label=label))
+    monkeypatch.setattr(features_axes, "axis_y_through", lambda comp, **kwargs: axis)
+    monkeypatch.setattr(features_warp, "new_sketch", lambda comp, plane, *, label: SimpleNamespace(label=label))
     corners: list[tuple[Any, ...]] = []
-    monkeypatch.setattr(features, "_seed_rect", lambda sk, *c, **kw: corners.append(c))
-    monkeypatch.setattr(features, "profile", lambda sk: "prof")
+    monkeypatch.setattr(features_warp, "_seed_rect", lambda sk, *c, **kw: corners.append(c))
+    monkeypatch.setattr(features_warp, "profile", lambda sk: "prof")
     dists: list[str] = []
 
     def fake_extrude(comp: Any, prof: Any, distance: str, **kwargs: Any) -> str:
         dists.append(distance)
         return "seed"
 
-    monkeypatch.setattr(features, "extrude", fake_extrude)
+    monkeypatch.setattr(features_warp, "extrude", fake_extrude)
     pat = MagicMock(name="pattern_rectangular", return_value="pat")
-    monkeypatch.setattr(features, "pattern_rectangular", pat)
+    monkeypatch.setattr(features_warp, "pattern_rectangular", pat)
     features._relief_family(
         MagicMock(name="comp"),
         MagicMock(name="bed"),
@@ -245,15 +249,15 @@ def test_warp_relief_grooves_plus_x_plumbing(monkeypatch: pytest.MonkeyPatch) ->
         axis_calls.append((axis, expr, value_mm, label))
         return plane
 
-    monkeypatch.setattr(features, "axis_plane", fake_axis_plane)
-    monkeypatch.setattr(features, "check_label", lambda label: None)
+    monkeypatch.setattr(features_warp, "axis_plane", fake_axis_plane)
+    monkeypatch.setattr(features_warp, "check_label", lambda label: None)
     fam_calls: list[tuple[str, int, str]] = []
 
     def fake_family(comp: Any, bed: Any, b: Any, along: str, **kw: Any) -> list[str]:
         fam_calls.append((along, kw["depth_sign"], kw["bed_dir"]))
         return [f"{along}_feat"]
 
-    monkeypatch.setattr(features, "_relief_family", fake_family)
+    monkeypatch.setattr(features_warp, "_relief_family", fake_family)
     out = features.warp_relief_grooves(MagicMock(name="comp"), body, label="warp", bed="+x")
     assert axis_calls == [("x", "7.000000 mm", 7.0, "warp_bed")]
     assert fam_calls == [("y", -1, "+x"), ("z", -1, "+x")]
@@ -277,11 +281,11 @@ def test_dfam_check_warns_only_when_tagged_face_unmapped(monkeypatch: pytest.Mon
         return ("fact", [], [])
 
     monkeypatch.setattr(
-        dfam, "print_frame_with_tags", lambda b: (object(), {"grip_fin": frozenset({7})}, ["grip_fin face 3"])
+        dfam_body, "print_frame_with_tags", lambda b: (object(), {"grip_fin": frozenset({7})}, ["grip_fin face 3"])
     )
-    monkeypatch.setattr(dfam, "facts_from_body", fake_facts)
-    monkeypatch.setattr(dfam, "check_all", lambda fact, holes, edges, skip: [])
-    monkeypatch.setattr(dfam, "skip_from_body", lambda b: {})
+    monkeypatch.setattr(dfam_body, "facts_from_body", fake_facts)
+    monkeypatch.setattr(dfam_body, "check_all", lambda fact, holes, edges, skip: [])
+    monkeypatch.setattr(dfam_body, "skip_from_body", lambda b: {})
     out = dfam.dfam_check(body)
     assert tags_seen == [{"grip_fin": frozenset({7})}]  # mapped tags reach facts_from_body
     assert [(f.rule, f.level) for f in out] == [("bed_frame", "WARN")]
@@ -291,8 +295,8 @@ def test_dfam_check_warns_only_when_tagged_face_unmapped(monkeypatch: pytest.Mon
 def test_dfam_check_no_bed_frame_warn_when_all_tags_mapped(monkeypatch: pytest.MonkeyPatch) -> None:
     body: Any = MagicMock()
     body.attributes.itemByName.side_effect = lambda grp, name: SimpleNamespace(value="+x") if name == "bed" else None
-    monkeypatch.setattr(dfam, "print_frame_with_tags", lambda b: (object(), {"mating": frozenset({1})}, []))
-    monkeypatch.setattr(dfam, "facts_from_body", lambda b, tags=None: ("fact", [], []))
-    monkeypatch.setattr(dfam, "check_all", lambda fact, holes, edges, skip: [])
-    monkeypatch.setattr(dfam, "skip_from_body", lambda b: {})
+    monkeypatch.setattr(dfam_body, "print_frame_with_tags", lambda b: (object(), {"mating": frozenset({1})}, []))
+    monkeypatch.setattr(dfam_body, "facts_from_body", lambda b, tags=None: ("fact", [], []))
+    monkeypatch.setattr(dfam_body, "check_all", lambda fact, holes, edges, skip: [])
+    monkeypatch.setattr(dfam_body, "skip_from_body", lambda b: {})
     assert dfam.dfam_check(body) == []

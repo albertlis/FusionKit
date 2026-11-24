@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from fusion_kit import features
+from fusion_kit import features_pattern
 from fusion_kit.features import _dedupe_tools, combine
 
 
@@ -69,7 +70,7 @@ def test_combine_passes_deduped_tools_to_fusion(monkeypatch: pytest.MonkeyPatch)
         captured.append(list(items))
         return captured[-1]
 
-    monkeypatch.setattr(features, "collection", fake_collection)
+    monkeypatch.setattr(features_pattern, "collection", fake_collection)
     comp = MagicMock()
     target = _Body("T")
     a = _Body("A")
@@ -80,7 +81,7 @@ def test_combine_passes_deduped_tools_to_fusion(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_combine_raises_before_any_fusion_call(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(features, "collection", lambda items: list(items))
+    monkeypatch.setattr(features_pattern, "collection", lambda items: list(items))
     comp = MagicMock()
     target = _Body("T")
     with pytest.raises(ValueError, match="no tool bodies left"):

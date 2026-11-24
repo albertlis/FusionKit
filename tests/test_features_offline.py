@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
-from fusion_kit import enums, features
+from fusion_kit import enums, features, features_axes, features_pattern
 from fusion_kit.expr import Ex, as_str
 from fusion_kit.features import (
     _OPS,
@@ -583,6 +583,92 @@ def test_on_plane_keeps_flat_edge_on_plane() -> None:
 
 
 # ---------------------------------------------------------------------------
+# select_edges(pred=, in_box_mm=): EdgeInfo in mm. adsk.core is a MagicMock offline, so isinstance(Circle3D)
+# needs real classes: real_circle_types swaps Circle3D / Arc3D for _FakeCircle for one test.
+# ---------------------------------------------------------------------------
+class _FakeCircle:
+    def __init__(self, centre: _Pt, radius: float, normal: tuple[float, float, float]) -> None:
+        self.center = centre  # cm
+        self.radius = radius  # cm
+        self.normal = _Pt(*normal)
+
+
+@pytest.fixture
+def real_circle_types(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_CORE, "Circle3D", _FakeCircle, raising=False)
+    monkeypatch.setattr(_CORE, "Arc3D", _FakeCircle, raising=False)
+
+
+def _round_edge(centre: _Pt, radius_cm: float, normal: tuple[float, float, float]) -> Any:
+    """Closed circle: no vertices (startVertex/endVertex None). bbox = centre +- r on every axis (approximate)."""
+    box = _Box(
+        _Pt(centre.x - radius_cm, centre.y - radius_cm, centre.z - radius_cm),
+        _Pt(centre.x + radius_cm, centre.y + radius_cm, centre.z + radius_cm),
+    )
+    return SimpleNamespace(
+        startVertex=None,
+        endVertex=None,
+        geometry=_FakeCircle(centre, radius_cm, normal),
+        tempId=next(_ids),
+        boundingBox=box,
+        faces=[],
+    )
+
+
+def test_pred_none_is_default_behaviour() -> None:
+    box = _box_body()
+    assert len(select_edges(box, pred=None)) == 12
+    assert select_edges(box, pred=None) == select_edges(box)
+
+
+def test_pred_filters_edges_by_bbox_mm(real_circle_types: None) -> None:
+    """Without pred: 12 edges. pred ignored -> 12, so this fails."""
+    got = select_edges(_box_body(), pred=lambda i: i.bbox_min_mm[2] == 10.0 and i.bbox_max_mm[2] == 10.0)
+    assert len(got) == 4
+    assert all(e.boundingBox.minPoint.z == 1.0 for e in got)
+
+
+def test_pred_gets_vertices_in_mm(real_circle_types: None) -> None:
+    """Fake vertices are cm: edge 0 runs (0,0,0)->(1,0,0) cm = (0,0,0)->(10,0,0) mm. Only it ends at (10,0,0) mm."""
+    box = _box_body()
+    assert select_edges(box, pred=lambda i: i.end_mm == (10.0, 0.0, 0.0)) == [box.edges[0]]
+
+
+def test_pred_and_combined_with_on_plane(real_circle_types: None) -> None:
+    box = _box_body()
+    assert len(select_edges(box, on_plane=("z", 10.0))) == 4
+    got = select_edges(box, on_plane=("z", 10.0), pred=lambda i: i.bbox_min_mm[0] == 0.0)
+    assert len(got) == 3  # top rim minus the x = 10 mm edge
+
+
+def test_pred_false_returns_empty(real_circle_types: None) -> None:
+    assert select_edges(_box_body(), pred=lambda _i: False) == []
+
+
+def test_in_box_mm_keeps_edges_fully_inside(real_circle_types: None) -> None:
+    """Top rim bbox z = 10 mm inside [9.5, 10.5]; bottom rim (z 0) and verticals (z 0..10) are not. Ignored -> 12."""
+    box = _box_body()
+    assert len(select_edges(box)) == 12
+    got = select_edges(box, in_box_mm=((0.0, 0.0, 9.5), (10.0, 10.0, 10.5)))
+    assert len(got) == 4
+    assert all(e.boundingBox.minPoint.z == 1.0 for e in got)
+
+
+def test_pred_circle_x_normal_radius_and_centre(real_circle_types: None) -> None:
+    hit = _round_edge(_Pt(0.0, 0.0, 0.5), 0.2, (1.0, 0.0, 0.0))  # centre z 5 mm, r 2 mm, normal X
+    wrong_r = _round_edge(_Pt(0.0, 0.0, 0.5), 0.3, (1.0, 0.0, 0.0))  # r 3 mm
+    wrong_n = _round_edge(_Pt(0.0, 0.0, 0.5), 0.2, (0.0, 0.0, 1.0))  # normal Z
+    body: Any = SimpleNamespace(edges=[hit, wrong_r, wrong_n])
+
+    def pin(i: Any) -> bool:
+        c = i.circle
+        return c is not None and c.parallel_to("x") and abs(c.radius_mm - 2.0) < 1e-6 and c.centre_mm[2] == 5.0
+
+    assert select_edges(body, pred=pin) == [hit]
+    assert select_edges(body, pred=lambda i: i.start_mm is None and i.end_mm is None) == [hit, wrong_r, wrong_n]
+
+
+# ---------------------------------------------------------------------------
 # combine()
 # ---------------------------------------------------------------------------
 def _combine_comp() -> tuple[Any, SimpleNamespace]:
@@ -621,7 +707,7 @@ def test_combine_keep_tools_and_intersect() -> None:
 # ---------------------------------------------------------------------------
 @pytest.fixture
 def pattern_comp(monkeypatch: pytest.MonkeyPatch) -> Any:
-    monkeypatch.setattr(features, "_count", lambda c, e: float(e))  # "1" -> 1.0
+    monkeypatch.setattr(features_pattern, "_count", lambda c, e: float(e))  # "1" -> 1.0
     return SimpleNamespace(
         features=SimpleNamespace(
             rectangularPatternFeatures=MagicMock(name="rect"),
@@ -878,7 +964,7 @@ def test_axis_y_through_intersects_two_planes_and_names_axis(
         calls.append((axis, expr, value_mm, label))
         return MagicMock(name=f"plane_{axis}")
 
-    monkeypatch.setattr(features, "axis_plane", fake_plane)
+    monkeypatch.setattr(features_axes, "axis_plane", fake_plane)
     inp = MagicMock(name="axis_input")
     inp.setByTwoPlanes.return_value = True
     axis = MagicMock(name="axis")
@@ -913,7 +999,7 @@ def test_axis_y_through_str_expr_value_from_fusion_in_mm(
         calls.append((axis, expr, value_mm, label))
         return MagicMock(name=f"plane_{axis}")
 
-    monkeypatch.setattr(features, "axis_plane", fake_plane)
+    monkeypatch.setattr(features_axes, "axis_plane", fake_plane)
     inp = MagicMock(name="axis_input")
     inp.setByTwoPlanes.return_value = True
     ca = MagicMock(name="constructionAxes", count=0)
@@ -939,7 +1025,7 @@ def test_axis_y_through_rejects_non_mm_and_bad_label(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     plane = MagicMock(name="axis_plane")
-    monkeypatch.setattr(features, "axis_plane", plane)
+    monkeypatch.setattr(features_axes, "axis_plane", plane)
     comp: Any = SimpleNamespace(constructionAxes=MagicMock(name="ca"))
     with pytest.raises(ValueError, match="expected mm"):
         features.axis_y_through(comp, x=Ex("a", 1.0, False, "deg"), z=Ex.mm(0.0), label="t_axis")
@@ -970,7 +1056,7 @@ def test_rotate_body_about_y_builds_axis_then_rotates(
         seen.append(("axis", label))
         return axis_sentinel
 
-    monkeypatch.setattr(features, "axis_y_through", fake_axis)
+    monkeypatch.setattr(features_axes, "axis_y_through", fake_axis)
     comp, inp, mv = _move_comp()
     _CORE.ValueInput.createByString.reset_mock()
     features.rotate_body_about_y(
@@ -992,7 +1078,7 @@ def test_rotate_body_about_y_negates_ex_angle_on_minus_y(
 ) -> None:
     axis_sentinel = MagicMock(name="y_axis")
     axis_sentinel.geometry.direction.y = -1.0
-    monkeypatch.setattr(features, "axis_y_through", lambda comp, *, x, z, label: axis_sentinel)
+    monkeypatch.setattr(features_axes, "axis_y_through", lambda comp, *, x, z, label: axis_sentinel)
     comp, _, _ = _move_comp()
     _CORE.ValueInput.createByString.reset_mock()
     features.rotate_body_about_y(
@@ -1019,7 +1105,7 @@ def test_rotate_body_about_y_axis_in_root_move_in_sub_comp(
         axis_comps.append(comp)
         return axis_sentinel
 
-    monkeypatch.setattr(features, "axis_y_through", fake_axis)
+    monkeypatch.setattr(features_axes, "axis_y_through", fake_axis)
     sub, inp, mv = _move_comp()
     features.rotate_body_about_y(
         sub,
@@ -1061,7 +1147,7 @@ def test_axis_y_through_second_call_deletes_previous_constructions(
 ) -> None:
     # Rebuild: previous call's root constructions (incl. Fusion " (n)" duplicates) go; unrelated names stay.
     monkeypatch.setattr(
-        features,
+        features_axes,
         "axis_plane",
         lambda comp, axis, expr, value_mm, *, label: _Named(label),
     )
@@ -1134,7 +1220,7 @@ def test_rotate_body_about_y_root_axis_label_scoped_by_comp(
         labels.append(label)
         return axis_sentinel
 
-    monkeypatch.setattr(features, "axis_y_through", fake_axis)
+    monkeypatch.setattr(features_axes, "axis_y_through", fake_axis)
     for name in ("comp_a", "Body 1"):
         comp, _, _ = _move_comp(name)
         features.rotate_body_about_y(
@@ -1159,7 +1245,7 @@ def test_rotate_body_about_x_root_axis_label_scoped_by_comp(
         labels.append(label)
         return axis_sentinel
 
-    monkeypatch.setattr(features, "axis_x_through", fake_axis)
+    monkeypatch.setattr(features_axes, "axis_x_through", fake_axis)
     for name in ("comp_a", "comp_b"):
         comp, _, _ = _move_comp(name)
         features.rotate_body_about_x(
@@ -1197,7 +1283,7 @@ def test_axis_x_through_intersects_y_z_planes_and_names_axis(
         calls.append((axis, expr, value_mm, label))
         return MagicMock(name=f"plane_{axis}")
 
-    monkeypatch.setattr(features, "axis_plane", fake_plane)
+    monkeypatch.setattr(features_axes, "axis_plane", fake_plane)
     inp = MagicMock(name="axis_input")
     inp.setByTwoPlanes.return_value = True
     axis = MagicMock(name="axis")
@@ -1225,7 +1311,7 @@ def test_axis_x_through_rejects_non_mm_and_bad_label(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     plane = MagicMock(name="axis_plane")
-    monkeypatch.setattr(features, "axis_plane", plane)
+    monkeypatch.setattr(features_axes, "axis_plane", plane)
     comp: Any = SimpleNamespace(constructionAxes=MagicMock(name="ca"))
     with pytest.raises(ValueError, match="expected mm"):
         features.axis_x_through(comp, y=Ex("a", 1.0, False, "deg"), z=Ex.mm(0.0), label="t_axis")
@@ -1256,7 +1342,7 @@ def test_rotate_body_about_x_builds_axis_then_rotates(
         seen.append(("axis", label))
         return axis_sentinel
 
-    monkeypatch.setattr(features, "axis_x_through", fake_axis)
+    monkeypatch.setattr(features_axes, "axis_x_through", fake_axis)
     comp, inp, mv = _move_comp()
     _CORE.ValueInput.createByString.reset_mock()
     features.rotate_body_about_x(
@@ -1278,7 +1364,7 @@ def test_rotate_body_about_x_negates_ex_angle_on_minus_x(
 ) -> None:
     axis_sentinel = MagicMock(name="x_axis")
     axis_sentinel.geometry.direction.x = -1.0
-    monkeypatch.setattr(features, "axis_x_through", lambda comp, *, y, z, label: axis_sentinel)
+    monkeypatch.setattr(features_axes, "axis_x_through", lambda comp, *, y, z, label: axis_sentinel)
     comp, _, _ = _move_comp()
     _CORE.ValueInput.createByString.reset_mock()
     features.rotate_body_about_x(
@@ -1304,7 +1390,7 @@ def test_rotate_body_about_x_axis_in_root_move_in_sub_comp(
         axis_comps.append(comp)
         return axis_sentinel
 
-    monkeypatch.setattr(features, "axis_x_through", fake_axis)
+    monkeypatch.setattr(features_axes, "axis_x_through", fake_axis)
     sub, inp, mv = _move_comp()
     features.rotate_body_about_x(
         sub,

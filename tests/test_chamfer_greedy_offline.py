@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from fusion_kit import features
+from fusion_kit import features_edges
 
 COMP: Any = MagicMock(name="comp")
 
@@ -54,7 +55,7 @@ class _FakeChamfer:
 
 def _install(monkeypatch: pytest.MonkeyPatch, refuse: Iterable[str] = (), final_raises: bool = False) -> _FakeChamfer:
     fake = _FakeChamfer(refuse, final_raises)
-    monkeypatch.setattr(features, "chamfer", fake)
+    monkeypatch.setattr(features_edges, "chamfer", fake)
     return fake
 
 

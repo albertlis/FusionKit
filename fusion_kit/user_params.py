@@ -34,7 +34,10 @@ _IDENT = re.compile(r"(?<![\w.])[A-Za-z_]\w*")
 
 
 def entry_fields(entry: ParamEntry) -> tuple[str, str, str]:
-    """(expression, units, comment) of a spec entry. 3- or 4-item entries accepted; other lengths -> ValueError."""
+    """(expression, units, comment) of a spec entry. 3- or 4-item entries accepted; other lengths -> ValueError.
+
+    -> (expression, units, comment) of a spec entry; 3 or 4 items, other lengths -> ValueError. Pure
+    """
     if len(entry) not in (3, 4):
         raise ValueError(f"param spec entry needs 3 or 4 items (expr, units, comment[, sweep]), got {len(entry)}")
     return entry[0], entry[1], entry[2]
@@ -44,6 +47,9 @@ def entry_sweep(entry: ParamEntry) -> SweepRange | None:
     """Sweep options of a spec entry (4th item), validated. None when the entry has no 4th item.
 
     ValueError: unknown key, 'values' with min/max, min without max (or reverse), empty values.
+
+    -> SweepRange (4th item, validated) or None. ValueError: unknown key, values with min/max, min
+    without max, empty values. Pure
     """
     entry_fields(entry)
     if len(entry) == 3:
@@ -107,6 +113,9 @@ def ensure_params(
                      only missing params get their spec expression.
     prune=True     : after add/update, delete every user param not in spec (dependents first);
                      still referenced at the end -> RuntimeError listing names. Default keeps them.
+
+    spec item = (expr, units, comment) or (expr, units, comment, SweepRange); the 4th item (min+max
+    or values, no_geometry) is validated here and not written to Fusion
     """
     for entry in spec.values():
         entry_sweep(entry)  # validates the optional 4th item early
@@ -157,6 +166,9 @@ def eval_fresh(design: adsk.fusion.Design, expr: str, units: str) -> float:
     ensure_params changes an upstream param in the same script it is not recomputed yet. So every
     user-param name in expr is replaced by its own fresh value (recursive, from .expression) with an
     explicit unit suffix; only the leftover literals reach Fusion. Non-user names (model params) stay as-is.
+
+    -> internal units (cm/rad). Derived user params re-evaluated from `.expression`, never stale
+    `.value` (used by `sketch.mm`)
     """
     up = design.userParameters
 

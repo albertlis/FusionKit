@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from fusion_kit import enums, features
+from fusion_kit import features_pattern
 from fusion_kit.features import pattern_rectangular
 from fusion_kit.sketch import anchor
 
@@ -33,7 +34,7 @@ def test_pattern_compute_option_constants_map_to_stub_members() -> None:
 # ---------------------------------------------------------------------------
 @pytest.fixture
 def pattern_comp(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Any, Any, Any]]:
-    monkeypatch.setattr(features, "_count", lambda c, e: float(e))  # qty "4" -> 4.0 (no Fusion runtime)
+    monkeypatch.setattr(features_pattern, "_count", lambda c, e: float(e))  # qty "4" -> 4.0 (no Fusion runtime)
     coll = MagicMock(name="coll")
     _CORE.ObjectCollection.create.return_value = coll
     rpf = MagicMock(name="rectangularPatternFeatures")

@@ -5,6 +5,8 @@ import re
 import adsk.core
 import adsk.fusion
 
+from fusion_kit.component import active_design
+
 # Labels are snake_case: tells a given name from Fusion defaults ("Extrude7", "Sketch12") without a list of them.
 LABEL_RE = re.compile(r"^[a-z][a-z0-9_]*\Z")  # \Z, not $: $ also matches before a trailing "\n"
 # Numbered label ("mount_hole_2"): usually one element repeated by hand instead of a pattern / mirror.
@@ -110,7 +112,7 @@ def run(_context: str) -> None:
     """Entry for loader.run_part (read-only execute): print the active design's timeline dump as JSON lines."""
     import json
 
-    design = adsk.fusion.Design.cast(adsk.core.Application.get().activeProduct)
+    design = active_design()
     unnamed, numbered = label_stats(design)
     print(json.dumps({"doc": design.parentDocument.name, "unnamed": unnamed, "numbered": numbered}))
     for row in dump(design):

@@ -6,6 +6,7 @@ Offline: parses source with ast (no adsk import).
 from __future__ import annotations
 
 import ast
+import functools
 import re
 from pathlib import Path
 
@@ -14,6 +15,10 @@ PKG = ROOT / "fusion_kit"
 DOC = ROOT / "docs" / "fusion_kit_api.md"
 ROW = re.compile(r"^\| ([a-z_]+\.[A-Za-z_]\w*) \|")
 HEADER = "| helper | signature | replaces raw adsk |"
+LINE_REF = re.compile(r" — ([a-z_]+)\.py:(\d+) \|")
+ROW_MAX = 160
+# col3 tokens alone exceed ROW_MAX; tokens stay byte-identical (hook parses them), so these rows may run long.
+TOKEN_HEAVY = frozenset({"features_extrude.extrude", "param_sweep.sweep_params", "sketch_quality.sketch_facts"})
 
 
 def public_functions() -> set[str]:
@@ -55,3 +60,37 @@ def test_no_duplicate_rows() -> None:
     rows = documented_rows()
     dups = sorted({r for r in rows if rows.count(r) > 1})
     assert not dups, f"duplicate rows: {dups}"
+
+
+def doc_rows() -> list[str]:
+    return [line for line in DOC.read_text(encoding="utf-8").splitlines() if ROW.match(line)]
+
+
+def row_name(line: str) -> str:
+    match = ROW.match(line)
+    assert match is not None
+    return match.group(1)
+
+
+@functools.cache
+def def_line(module: str, name: str) -> int:
+    tree = ast.parse((PKG / f"{module}.py").read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node.lineno
+    raise AssertionError(f"{module}.{name} not defined in {module}.py")
+
+
+def test_row_line_refs_match_defs() -> None:
+    stale: list[str] = []
+    for line in doc_rows():
+        mod, name = row_name(line).split(".", 1)
+        ref = LINE_REF.search(line)
+        if ref is None or ref.group(1) != mod or int(ref.group(2)) != def_line(mod, name):
+            stale.append(row_name(line))
+    assert not stale, f"stale ' — {{module}}.py:LINE' refs in {DOC.name}: {stale}"
+
+
+def test_row_length_max_160() -> None:
+    long_rows = [row_name(line) for line in doc_rows() if len(line) > ROW_MAX and row_name(line) not in TOKEN_HEAVY]
+    assert not long_rows, f"rows over {ROW_MAX} chars (not token-heavy): {long_rows}"

@@ -7,6 +7,7 @@ import adsk.core
 import adsk.fusion
 
 from fusion_kit import enums, sketch_quality
+from fusion_kit.component import active_design
 from fusion_kit.dfam import Finding, dfam_check, summarize_findings
 from fusion_kit.features import collection, face_normal
 from fusion_kit.timeline import label_stats
@@ -37,6 +38,9 @@ def report(comp: adsk.fusion.Component, dfam: bool = True) -> str:
     bbox is COMP-NATIVE coords (component's own frame, ignores occurrence transform). Moved/rotated occ -> use world_bbox(occ).
     design_timeline_unhealthy is design-wide, not comp-scoped. Timeline groups carry no health state -> skipped.
     suppressed=N: timeline features with isSuppressed (intentional, e.g. disabled holes) -> counted there, NOT as unhealthy.
+
+    Prints `design_timeline_unhealthy=N ... timeline_numbered=N suppressed=N`; `suppressed` =
+    timeline features with `isSuppressed` (excluded from unhealthy)
     """
     text = format_report(report_data(comp, dfam))
     print(text)
@@ -63,9 +67,11 @@ class ReportData:
 
 
 def report_data(comp: adsk.fusion.Component, dfam: bool = True) -> ReportData:
-    """Measurements behind report(), as data. Prints nothing. Field meaning: see report()."""
-    app = adsk.core.Application.get()
-    design = adsk.fusion.Design.cast(app.activeProduct)
+    """Measurements behind report(), as data. Prints nothing. Field meaning: see report().
+
+    -> ReportData (structured facts, prints nothing; findings None when dfam=False)
+    """
+    design = active_design()
 
     bodies = comp.bRepBodies.count
     lumps = sum(b.lumps.count for b in comp.bRepBodies)
@@ -112,7 +118,10 @@ def report_data(comp: adsk.fusion.Component, dfam: bool = True) -> ReportData:
 
 
 def format_report(data: ReportData) -> str:
-    """report() text: summary line (+ ` dfam=<nF>F/<nW>W` when findings not None), then one line per finding. Pure."""
+    """report() text: summary line (+ ` dfam=<nF>F/<nW>W` when findings not None), then one line per finding. Pure.
+
+    -> report() text from ReportData. Pure
+    """
     if data.bbox_mm is None:
         bbox, vol_str = "no-bodies", "0cm3"
     else:

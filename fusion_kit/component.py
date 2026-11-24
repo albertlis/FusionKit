@@ -14,3 +14,14 @@ def new_occ(root: adsk.fusion.Component, name: str) -> adsk.fusion.Occurrence:
     occ = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
     occ.component.name = name
     return occ
+
+
+def active_design() -> adsk.fusion.Design:
+    """Active Fusion design. RuntimeError when no design is active (never returns None).
+
+    -> adsk.fusion.Design (RuntimeError when no active design)
+    """
+    design = adsk.fusion.Design.cast(adsk.core.Application.get().activeProduct)
+    if design is None:
+        raise RuntimeError("no active Fusion design")
+    return design

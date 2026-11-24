@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from fusion_kit import sketch
+from fusion_kit import component, sketch
 
 _TOKEN = re.compile(r"(\d+(?:\.\d+)?)\s*(mm|cm)?|([A-Za-z_]\w*)")
 
@@ -63,6 +63,7 @@ def fusion_design(monkeypatch: pytest.MonkeyPatch) -> Iterator[StaleDesign]:
         fusion=SimpleNamespace(Design=SimpleNamespace(cast=lambda obj: obj)),
     )
     monkeypatch.setattr(sketch, "adsk", fake_adsk)
+    monkeypatch.setattr(component, "adsk", fake_adsk)  # sketch.mm -> component.active_design
     yield design
 
 

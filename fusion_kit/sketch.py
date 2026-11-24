@@ -17,12 +17,23 @@ from collections.abc import Iterator
 import adsk.core
 import adsk.fusion
 
+from fusion_kit.component import active_design
 from fusion_kit.enums import ALIGNED_DIM, HORIZONTAL_DIM, VERTICAL_DIM
 from fusion_kit.expr import Ex, as_str
 from fusion_kit.timeline import check_label, set_label
 from fusion_kit.user_params import eval_fresh
 
 P3 = adsk.core.Point3D.create
+
+# Initial-geometry jitter (mm). Exact shared coordinates make Fusion infer alignment constraints ->
+# VCS_SKETCH_OVER_CONSTRAINTS. Initial vertices / circle centres are offset; dims or anchor()/fix_point snap them exact.
+JITTER_MM = 0.05
+JITTER_STEP_MM = 0.013
+
+
+def _jitter_offset(k: int, axis: int, jitter_mm: float = JITTER_MM) -> float:
+    """Initial offset (mm) of vertex k on coordinate index axis. Distinct per k and axis."""
+    return jitter_mm + JITTER_STEP_MM * k * (axis + 1)
 
 
 def new_sketch(
@@ -56,22 +67,36 @@ def to_sketch(s: adsk.fusion.Sketch, x_mm: float, y_mm: float, z_mm: float) -> a
     return s.modelToSketchSpace(P3(x_mm / 10, y_mm / 10, z_mm / 10))
 
 
+def _centre_mm(v: float | str | Ex) -> float:
+    """Centre coordinate: float = mm; expression string / Ex = evaluated via mm() (fresh, live params)."""
+    return mm(as_str(v)) if isinstance(v, str | Ex) else float(v)
+
+
 def circle(
     s: adsk.fusion.Sketch,
-    x: float,
-    y: float,
+    x: float | str | Ex,
+    y: float | str | Ex,
     r: float,
-    z: float = 0.0,
+    z: float | str | Ex = 0.0,
     diameter: str | Ex | None = None,
 ) -> adsk.fusion.SketchCircle:
-    """Circle centred at MODEL point (x, y, z) mm, radius r mm. diameter -> parametric diameter dim.
+    """Circle centred at MODEL point (x, y, z), radius r mm. diameter -> parametric diameter dim.
 
-    Centre stays free: position it with anchor().
+    x, y, z: mm float, or expression string / Ex. Expressions are evaluated here for the INITIAL drawn position only;
+    the parametric position comes from anchor() / fix_point(). Part code: circle(s, "cx_expr", "cy_expr", r) — no mm().
+
+    Centre stays free: position it with anchor(). Initial centre is offset in-plane by _jitter_offset (same as
+    param_poly vertices) so Fusion infers no alignment with existing vertices; anchor/fix_point snap it exact.
+    k = circles already in the sketch: two circles requested at the same centre must not land on one point
+    (Fusion then infers coincidence -> VCS_SKETCH_OVER_CONSTRAINTS).
     The centre is projected onto the sketch plane (sketch z = 0): on an offset plane a model point off the plane
     keeps a nonzero sketch z, the circle floats off-plane and its extrude starts there (cut misses the body).
     """
-    c0 = to_sketch(s, x, y, z)
-    c = s.sketchCurves.sketchCircles.addByCenterRadius(P3(c0.x, c0.y, 0.0), r / 10)
+    c0 = to_sketch(s, _centre_mm(x), _centre_mm(y), _centre_mm(z))
+    k = s.sketchCurves.sketchCircles.count
+    cx = c0.x + _jitter_offset(k, 0) / 10
+    cy = c0.y + _jitter_offset(k, 1) / 10
+    c = s.sketchCurves.sketchCircles.addByCenterRadius(P3(cx, cy, 0.0), r / 10)
     if diameter is not None:
         g = c.centerSketchPoint.geometry
         s.sketchDimensions.addDiameterDimension(c, P3(g.x + r / 10, g.y + r / 10, 0)).parameter.expression = as_str(
@@ -290,8 +315,7 @@ Pt = tuple[str, str, str]  # MODEL x, y, z as signed expressions
 
 def mm(expr: str) -> float:
     """Expression -> mm. Derived user params are re-evaluated from .expression (no stale .value)."""
-    design = adsk.fusion.Design.cast(adsk.core.Application.get().activeProduct)
-    return eval_fresh(design, expr, "mm") * 10
+    return eval_fresh(active_design(), expr, "mm") * 10
 
 
 def _sketch_dims(s: adsk.fusion.Sketch, p: Pt) -> tuple[str | None, str | None]:
@@ -435,12 +459,22 @@ def _hv_plan(s: adsk.fusion.Sketch, pts: list[Pt]) -> tuple[list[frozenset[int]]
     return skip, links
 
 
+def model_axis_to_sketch(s: adsk.fusion.Sketch, model_axis: int) -> int:
+    """Sketch axis (0 = x, 1 = y) that model axis model_axis (0 = x, 1 = y, 2 = z) runs along in sketch s."""
+    o = to_sketch(s, 0.0, 0.0, 0.0)
+    unit = [0.0, 0.0, 0.0]
+    unit[model_axis] = 1.0
+    q = to_sketch(s, unit[0], unit[1], unit[2])
+    return 0 if abs(q.x - o.x) > abs(q.y - o.y) else 1
+
+
 def param_poly(
     s: adsk.fusion.Sketch,
     pts: list[Pt],
     *,
-    jitter_mm: float = 0.05,
+    jitter_mm: float = JITTER_MM,
     hv: bool = False,
+    skip_axes: list[frozenset[int]] | None = None,
 ) -> list[adsk.fusion.SketchLine]:
     """Closed polygon, every vertex dimensioned to its model-coordinate expressions (fully constrained).
 
@@ -448,10 +482,17 @@ def param_poly(
     in-plane axis gets addHorizontal / addVertical, and that coordinate is dimensioned once per linked set instead of
     per vertex (_hv_plan). Still fully constrained, expressions stay live. hv=False: one dim per nonzero coordinate.
 
-    Per-vertex in-plane start offset = jitter_mm + 0.013 * k * (axis + 1) mm (gaps L62/L64: exact shared coords ->
+    Per-vertex in-plane start offset = jitter_mm + JITTER_STEP_MM * k * (axis + 1) mm (gaps L62/L64: exact shared coords ->
     inferred alignment -> VCS_SKETCH_OVER_CONSTRAINTS); the vertex dims snap it back. Geometric constraints created by
     this call (drawing inference) are deleted before the dims go on; constraints already on the sketch are kept. Out-of-plane coordinate stays exact. Line i starts at vertex i.
+
+    `deleteMe`, `addHorizontal`, `addVertical` (hv=True)
+
+    skip_axes (hv=False only): per vertex, sketch axes (0 = x, 1 = y) given no dim. Initial placement only; the caller
+    constrains them (geometric constraints). None = dim every nonzero coord as before.
     """
+    if skip_axes is not None and (hv or len(skip_axes) != len(pts)):
+        raise ValueError("param_poly: skip_axes needs hv=False and one entry per vertex")
     o = to_sketch(s, 0.0, 0.0, 0.0)
     units = [
         to_sketch(s, 1.0, 0.0, 0.0),
@@ -464,7 +505,7 @@ def param_poly(
         v = [mm(a), mm(b), mm(c)]
         for i in range(3):
             if i != normal:
-                v[i] += jitter_mm + 0.013 * k * (i + 1)
+                v[i] += _jitter_offset(k, i, jitter_mm)
         vals.append((v[0], v[1], v[2]))
     before = {
         gc.entityToken for gc in s.geometricConstraints
@@ -472,8 +513,8 @@ def param_poly(
     lines = poly(s, vals)
     _drop_inferred(s, before)  # inferred alignments would fight the vertex dims
     if not hv:
-        for ln, p in zip(lines, pts):
-            fix_point(s, ln.startSketchPoint, p)
+        for ln, p, sk in zip(lines, pts, skip_axes or [frozenset()] * len(pts)):
+            fix_point(s, ln.startSketchPoint, p, skip_axes=sk)
         return lines
     skip, links = _hv_plan(s, pts)
     for ln, p, sk in zip(lines, pts, skip):

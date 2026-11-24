@@ -112,6 +112,9 @@ def candidates(original: str, opts: SweepRange) -> list[str]:
     """Expressions to probe, baseline first: original, then min/max (or values in order). Duplicates dropped.
 
     With neither min/max nor values -> [original] only (judge sees a single probe, no-effect check skipped).
+
+    -> expressions to probe: original first, then min and max (or values in order), duplicates
+    dropped. Pure
     """
     values = opts.get("values")
     ordered = values if values is not None else [opts.get("min", original), opts.get("max", original)]
@@ -123,12 +126,18 @@ def candidates(original: str, opts: SweepRange) -> list[str]:
 
 
 def unhealthy_names(items: Sequence[ItemFact]) -> tuple[str, ...]:
-    """Names of failed timeline features: not a group, not suppressed, not healthy. Order kept."""
+    """Names of failed timeline features: not a group, not suppressed, not healthy. Order kept.
+
+    -> names of timeline features that are not groups, not suppressed and not healthy. Pure
+    """
     return tuple(i.name for i in items if not i.is_group and not i.suppressed and not i.healthy)
 
 
 def geometry(bodies: Sequence[BodyFact]) -> tuple[int, float, Box | None]:
-    """(body count, total volume cm3, bbox mm over all bodies). Bbox None when there are no bodies."""
+    """(body count, total volume cm3, bbox mm over all bodies). Bbox None when there are no bodies.
+
+    -> (body count, total volume cm3, bbox mm as (min xyz, max xyz) or None when no bodies). Pure
+    """
     if not bodies:
         return 0, 0.0, None
     lo: Xyz = (min(b.lo_cm[0] for b in bodies), min(b.lo_cm[1] for b in bodies), min(b.lo_cm[2] for b in bodies))
@@ -143,7 +152,10 @@ def _centres_mm(bodies: Sequence[BodyFact]) -> tuple[Xyz, ...]:
 
 
 def same_geometry(a: Probe, b: Probe) -> bool:
-    """True when both probes measured and body count, volume, bbox and per-body centre of mass agree (tolerances)."""
+    """True when both probes measured and body count, volume, bbox and per-body centre of mass agree (tolerances).
+
+    -> True when both probes measured and count, volume (1e-6 cm3) and bbox (1e-3 mm) agree. Pure
+    """
     if a.error is not None or b.error is not None:
         return False
     if a.bodies != b.bodies or not math.isclose(a.vol_cm3, b.vol_cm3, rel_tol=0.0, abs_tol=VOL_TOL_CM3):
@@ -163,7 +175,11 @@ def same_geometry(a: Probe, b: Probe) -> bool:
 
 
 def new_fails(baseline: Probe, probe: Probe) -> list[str]:
-    """DfAM FAIL findings of probe that baseline does not have (exact text). Empty when either probe is rejected."""
+    """DfAM FAIL findings of probe that baseline does not have (exact text). Empty when either probe is rejected.
+
+    -> list of DfAM FAIL texts ('rule: msg') of probe that baseline lacks; [] when either probe
+    rejected. Pure
+    """
     if baseline.error is not None or probe.error is not None:
         return []
     return [m for m in probe.dfam_fails if m not in baseline.dfam_fails]
@@ -203,6 +219,11 @@ def judge(
     bodies_expected None -> expected body count = baseline probe's count.
     No-effect check needs >= 2 probes, all measured, and not no_geometry.
     dfam / print lines: probes[1:] only, and only what the baseline does not already have (new_fails, print_ok).
+
+    -> DFAM_FAIL param_sweep lines: rejected by Fusion, unhealthy (names), bodies != expected
+    (baseline count unless given), dfam: probe DfAM FAIL not in baseline (first shown, (+N more)),
+    ovh: probe print FAIL while baseline ok (overhang mm2), no effect on geometry (BUILD-ONLY param;
+    needs >= 2 probes, skipped when no_geometry). Pure
     """
     if not probes:
         raise ValueError(f"judge({name!r}): no probes")
@@ -236,14 +257,20 @@ def judge(
 
 
 def format_sweep(rows: Sequence[SweepRow]) -> list[str]:
-    """['param_sweep: N params, F fail', *fail lines]. N = swept params (+ combos), F = rows with >= 1 fail line."""
+    """['param_sweep: N params, F fail', *fail lines]. N = swept params (+ combos), F = rows with >= 1 fail line.
+
+    -> ['param_sweep: N params, F fail', *fail lines]; F = params with >= 1 fail. Pure
+    """
     failing = sum(1 for r in rows if r.fails)
     fails = [line for r in rows for line in r.fails]
     return [f"param_sweep: {len(rows)} params, {failing} fail", *fails]
 
 
 def sweep_token(rows: Sequence[SweepRow]) -> str:
-    """Summary keyword value: '<N>p/<F>F' (swept params / failing params, combos counted as rows)."""
+    """Summary keyword value: '<N>p/<F>F' (swept params / failing params, combos counted as rows).
+
+    -> '<N>p/<F>F' (summary keyword value). Pure
+    """
     failing = sum(1 for r in rows if r.fails)
     return f"{len(rows)}p/{failing}F"
 
@@ -352,6 +379,9 @@ def body_verdict(body: adsk.fusion.BRepBody, up_rot: Rot) -> BodyVerdict:
 
     Same calls as build_check._body_check: dfam_check(body) (reads the body's stored bed) and check_body(body, up_rot).
     Prints TIME dfam:<body> and TIME check:<body>.
+
+    -> (FAIL findings as 'rule: msg', print overhang mm2, print ok) per body: same calls as
+    build_check._body_check (dfam_check reads the stored bed, check_body in up_rot). Fusion side
     """
     t0 = time.perf_counter()
     fails = tuple(f"{f.rule}: {f.msg}" for f in dfam_check(body) if f.level == "FAIL")
@@ -528,6 +558,14 @@ def sweep_params(
     compared with the originals measured with the grooves suppressed (measured once, lazily). Other rows keep the
     grooves and are compared with the full baseline.
     Read `fails` for DFAM_FAIL lines.
+
+    -> list[SweepRow]: combos = [{param: expr}] set together as one extra probe per combo (row name
+    'a+b', baseline = originals, no-effect check off, unknown name / empty combo -> ValueError
+    before anything is set); print_frames {comp name: Rot} feed body_verdict per probe; for each
+    spec entry with a 4th item min+max or values, set userParameters.itemByName(n).expression to
+    each candidate, read timeline health and native bodies of all components, restore the original
+    expression (finally). RuntimeError from the setter is recorded as a `rejected` finding. Params
+    without a range are skipped; unknown name -> ValueError. One Fusion recompute per probe
     """
     frames: Mapping[str, Rot] = print_frames or {}
     up = design.userParameters

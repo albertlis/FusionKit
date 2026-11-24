@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from fusion_kit import dfam, features
+from fusion_kit import dfam_body, features
 from fusion_kit import report as rep_mod
 from fusion_kit.dfam import (
     BodyFact,
@@ -213,7 +213,7 @@ def test_dfam_check_fail_as_warn_downgrades_fail_only(
         vertical_wall_mm=[],
         has_cavity=False,
     )
-    monkeypatch.setattr(dfam, "facts_from_body", lambda body, tags=None: (bf, [], []))
+    monkeypatch.setattr(dfam_body, "facts_from_body", lambda body, tags=None: (bf, [], []))
     body = MagicMock(attributes=_Attrs())
     assert [(f.rule, f.level) for f in dfam_check(body)] == [("warp_grooves", "FAIL")]
     assert [(f.rule, f.level) for f in dfam_check(body, fail_as_warn=True)] == [("warp_grooves", "WARN")]

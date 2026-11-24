@@ -69,7 +69,7 @@ def fix_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[list[tuple[Any, tuple[str, str, str]]]]:
     calls: list[tuple[Any, tuple[str, str, str]]] = []
-    monkeypatch.setattr(fk_sketch, "fix_point", lambda s, sp, p: calls.append((sp, p)))
+    monkeypatch.setattr(fk_sketch, "fix_point", lambda s, sp, p, **_kw: calls.append((sp, p)))
     yield calls
 
 
@@ -131,6 +131,21 @@ def test_fix_point_per_vertex_with_original_exprs(point3d_xyz: None, fake_mm: No
     lines = param_poly(_sketch([]), TRI)
     assert [p for _, p in fix_calls] == TRI
     assert all(sp is ln.startSketchPoint for (sp, _), ln in zip(fix_calls, lines))
+
+
+def test_skip_axes_each_vertex_reaches_fix_point(
+    point3d_xyz: None, fake_mm: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    got: list[tuple[str, frozenset[int]]] = []
+    monkeypatch.setattr(
+        fk_sketch, "fix_point", lambda s, sp, p, *, skip_axes=frozenset(): got.append((p[0], skip_axes))
+    )
+    axes = [frozenset({0}), frozenset(), frozenset({1})]
+    param_poly(_sketch([]), TRI, skip_axes=axes)
+    assert [sk for _, sk in got] == axes
+    got.clear()
+    param_poly(_sketch([]), TRI)  # None -> every vertex anchored (empty skip set)
+    assert [sk for _, sk in got] == [frozenset()] * 3
 
 
 def test_rect_two_corners_dims_and_anchor(monkeypatch: pytest.MonkeyPatch, fake_mm: None) -> None:

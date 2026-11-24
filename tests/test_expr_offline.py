@@ -8,7 +8,7 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from fusion_kit.expr import Ex, deg, evaluate, near, trig
+from fusion_kit.expr import Ex, abs_expr, deg, evaluate, max_expr, min_expr, near, trig
 
 
 # ---------------------------------------------------------------------------
@@ -204,3 +204,35 @@ def test_evaluate_length_units_to_mm(expr: str, mm: float) -> None:
 def test_evaluate_angle_units_to_radians() -> None:
     assert evaluate("90 deg", {}) == pytest.approx(math.pi / 2)
     assert evaluate("1 rad", {}) == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# abs_expr / min_expr / max_expr: Fusion expression forms (Fusion has no abs/min/max in User Parameters)
+# ---------------------------------------------------------------------------
+def test_abs_expr_string() -> None:
+    assert abs_expr("x") == "(sqrt((x) / 1 mm * ((x) / 1 mm)) * 1 mm)"
+
+
+def test_min_max_expr_string() -> None:
+    assert min_expr("a", "b") == "(((a) + (b) - (sqrt(((a) - (b)) / 1 mm * (((a) - (b)) / 1 mm)) * 1 mm)) / 2)"
+    assert max_expr("a", "b") == "(((a) + (b) + (sqrt(((a) - (b)) / 1 mm * (((a) - (b)) / 1 mm)) * 1 mm)) / 2)"
+
+
+@pytest.mark.parametrize(("x", "want"), [(3.0, 3.0), (-3.0, 3.0), (0.0, 0.0), (-2.5, 2.5)])
+def test_abs_expr_evaluates(x: float, want: float) -> None:
+    assert evaluate(abs_expr("x"), {"x": x}) == pytest.approx(want)
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [(3.0, 5.0), (5.0, 3.0), (4.0, 4.0), (-2.0, 7.0), (-7.0, -2.0), (0.0, 0.0), (1.5, -1.5)],
+)
+def test_min_max_expr_evaluate(a: float, b: float) -> None:
+    names = {"a": a, "b": b}
+    assert evaluate(min_expr("a", "b"), names) == pytest.approx(min(a, b))
+    assert evaluate(max_expr("a", "b"), names) == pytest.approx(max(a, b))
+
+
+def test_min_max_expr_mm_units() -> None:
+    assert evaluate(min_expr("2 mm", "gap"), {"gap": 3.0}) == pytest.approx(2.0)
+    assert evaluate(max_expr("2 mm", "gap"), {"gap": 3.0}) == pytest.approx(3.0)

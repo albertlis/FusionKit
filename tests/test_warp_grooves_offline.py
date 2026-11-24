@@ -7,11 +7,28 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from fusion_kit import features
+from fusion_kit import features, features_axes, features_warp
 from fusion_kit.dfam import BedDir
 from fusion_kit.enums import IDENTICAL_PATTERN
 from fusion_kit.expr import evaluate
 from fusion_kit.features import GROOVE_EDGE_MIN_MM, groove_positions
+
+
+def _fresh_mm(names: dict[str, float]) -> Any:
+    """eval_fresh stand-in: user-param expr -> internal cm (Fusion units) from the given mm values."""
+    return lambda design, expr, units: evaluate(expr, names) / 10
+
+
+@pytest.fixture(autouse=True)
+def _param_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests passing *_expr with a MagicMock comp: user-param values come from here, not snapshot_geo(MagicMock)."""
+    names = {
+        "warp_groove_width": 0.8,
+        "warp_groove_depth": 0.3,
+        "warp_groove_margin": 5.0,
+        "warp_groove_target_pitch": 30.0,
+    }
+    monkeypatch.setattr(features_warp, "eval_fresh", _fresh_mm(names))
 
 
 def test_span_at_or_below_35_has_no_grooves() -> None:
@@ -123,13 +140,13 @@ def test_relief_family_pattern_uses_origin_axis_positive_step(
     comp = MagicMock(name="comp")
     through = MagicMock(name="axis_through")
     for axis_fn in ("axis_x_through", "axis_y_through", "axis_z_through"):
-        monkeypatch.setattr(features, axis_fn, through)
-    monkeypatch.setattr(features, "new_sketch", lambda comp, plane, *, label: SimpleNamespace(label=label))
-    monkeypatch.setattr(features, "_seed_rect", lambda sk, *corners, **kw: None)
-    monkeypatch.setattr(features, "profile", lambda sk: "prof")
-    monkeypatch.setattr(features, "extrude", lambda comp, prof, distance, **kwargs: "seed")
+        monkeypatch.setattr(features_axes, axis_fn, through)
+    monkeypatch.setattr(features_warp, "new_sketch", lambda comp, plane, *, label: SimpleNamespace(label=label))
+    monkeypatch.setattr(features_warp, "_seed_rect", lambda sk, *corners, **kw: None)
+    monkeypatch.setattr(features_warp, "profile", lambda sk: "prof")
+    monkeypatch.setattr(features_warp, "extrude", lambda comp, prof, distance, **kwargs: "seed")
     pat = MagicMock(name="pattern_rectangular", return_value="pat")
-    monkeypatch.setattr(features, "pattern_rectangular", pat)
+    monkeypatch.setattr(features_warp, "pattern_rectangular", pat)
     # 100 mm cube (cm bbox) -> centres -30, 0, 30 mm on every axis; z needs z bounds, hence not _relief_body()
     body: Any = SimpleNamespace(
         boundingBox=SimpleNamespace(
@@ -168,13 +185,13 @@ def _run_family(
 ) -> MagicMock:
     axis_fn = "axis_x_through" if along == "x" else "axis_y_through"
     axis = SimpleNamespace(geometry=SimpleNamespace(direction=SimpleNamespace(x=1.0, y=1.0, z=0.0)))
-    monkeypatch.setattr(features, axis_fn, lambda comp, **kwargs: axis)
-    monkeypatch.setattr(features, "new_sketch", lambda comp, plane, *, label: SimpleNamespace(label=label))
-    monkeypatch.setattr(features, "_seed_rect", lambda sk, *corners, **kw: corners_out.append(corners))
-    monkeypatch.setattr(features, "profile", lambda sk: "prof")
-    monkeypatch.setattr(features, "extrude", lambda comp, prof, distance, **kwargs: "seed")
+    monkeypatch.setattr(features_axes, axis_fn, lambda comp, **kwargs: axis)
+    monkeypatch.setattr(features_warp, "new_sketch", lambda comp, plane, *, label: SimpleNamespace(label=label))
+    monkeypatch.setattr(features_warp, "_seed_rect", lambda sk, *corners, **kw: corners_out.append(corners))
+    monkeypatch.setattr(features_warp, "profile", lambda sk: "prof")
+    monkeypatch.setattr(features_warp, "extrude", lambda comp, prof, distance, **kwargs: "seed")
     pat = MagicMock(name="pattern_rectangular", return_value="pat")
-    monkeypatch.setattr(features, "pattern_rectangular", pat)
+    monkeypatch.setattr(features_warp, "pattern_rectangular", pat)
     features._relief_family(
         MagicMock(name="comp"),
         MagicMock(name="bed"),
@@ -201,9 +218,9 @@ def test_seed_rect_dims_both_corners_to_origin(monkeypatch: pytest.MonkeyPatch) 
     # Regression: corner-to-corner dims let the solver flip the far edge (live X centre 14.2 instead of 15).
     # Fails on the old rect_xy seed: no fix_point on the far corner, no _seed_rect.
     lines = [MagicMock(name=f"l{i}") for i in range(4)]
-    monkeypatch.setattr(features, "rect", lambda s, a, b: lines)
+    monkeypatch.setattr(features_warp, "rect", lambda s, a, b: lines)
     fix = MagicMock(name="fix_point")
-    monkeypatch.setattr(features, "fix_point", fix)
+    monkeypatch.setattr(features_warp, "fix_point", fix)
     features._seed_rect(MagicMock(name="sketch"), 14.6, 20.0, 15.4, 21.0)
     assert fix.call_count == 2
     near, far = fix.call_args_list
@@ -254,13 +271,13 @@ def _family_capture(
         seen["depth"] = distance
         return "seed"
 
-    monkeypatch.setattr(features, axis_fn, lambda comp, **kwargs: axis)
-    monkeypatch.setattr(features, "new_sketch", lambda comp, plane, *, label: SimpleNamespace(label=label))
-    monkeypatch.setattr(features, "_seed_rect", fake_seed)
-    monkeypatch.setattr(features, "profile", lambda sk: "prof")
-    monkeypatch.setattr(features, "extrude", fake_extrude)
+    monkeypatch.setattr(features_axes, axis_fn, lambda comp, **kwargs: axis)
+    monkeypatch.setattr(features_warp, "new_sketch", lambda comp, plane, *, label: SimpleNamespace(label=label))
+    monkeypatch.setattr(features_warp, "_seed_rect", fake_seed)
+    monkeypatch.setattr(features_warp, "profile", lambda sk: "prof")
+    monkeypatch.setattr(features_warp, "extrude", fake_extrude)
     pat = MagicMock(name="pattern_rectangular", return_value="pat")
-    monkeypatch.setattr(features, "pattern_rectangular", pat)
+    monkeypatch.setattr(features_warp, "pattern_rectangular", pat)
     features._relief_family(
         MagicMock(name="comp"),
         MagicMock(name="bed"),
@@ -301,9 +318,9 @@ def test_no_expr_args_keep_literals(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_seed_rect_exprs_replace_axis_corner_dims(monkeypatch: pytest.MonkeyPatch) -> None:
     lines = [MagicMock(name=f"l{i}") for i in range(4)]
-    monkeypatch.setattr(features, "rect", lambda s, a, b: lines)
+    monkeypatch.setattr(features_warp, "rect", lambda s, a, b: lines)
     fix = MagicMock(name="fix_point")
-    monkeypatch.setattr(features, "fix_point", fix)
+    monkeypatch.setattr(features_warp, "fix_point", fix)
     features._seed_rect(MagicMock(name="sketch"), 14.6, 20.0, 15.4, 21.0, exprs={0: ("LO", "HI")})
     near, far = fix.call_args_list
     assert near.args[2] == ("LO", "20.000000 mm", "0.000000 mm")
@@ -318,15 +335,15 @@ def test_warp_relief_grooves_passes_expr_strings_to_both_families(monkeypatch: p
         )
     )
     plane = SimpleNamespace(geometry=SimpleNamespace(normal=SimpleNamespace(x=0.0, y=0.0, z=1.0)))
-    monkeypatch.setattr(features, "axis_plane", lambda comp, axis, expr, value_mm, label: plane)
-    monkeypatch.setattr(features, "set_bed", lambda body, bed: None)
+    monkeypatch.setattr(features_warp, "axis_plane", lambda comp, axis, expr, value_mm, label: plane)
+    monkeypatch.setattr(features_warp, "set_bed", lambda body, bed: None)
     calls: list[tuple[str, dict[str, Any]]] = []
 
     def fake_family(comp: Any, bed_plane: Any, b: Any, along: str, **kwargs: Any) -> list[str]:
         calls.append((along, kwargs))
         return ["f"]
 
-    monkeypatch.setattr(features, "_relief_family", fake_family)
+    monkeypatch.setattr(features_warp, "_relief_family", fake_family)
     out = features.warp_relief_grooves(
         MagicMock(name="comp"),
         body,
@@ -370,15 +387,15 @@ def test_seed_corners_are_centre_pm_half_width_in_model_coords(
     monkeypatch: pytest.MonkeyPatch, bed: BedDir, along: Literal["x", "y", "z"]
 ) -> None:
     fix = MagicMock(name="fix_point")
-    monkeypatch.setattr(features, "rect", lambda s, a, b: [MagicMock(name=f"l{k}") for k in range(4)])
-    monkeypatch.setattr(features, "fix_point", fix)
-    monkeypatch.setattr(features, "new_sketch", lambda comp, plane, *, label: SimpleNamespace(label=label))
-    monkeypatch.setattr(features, "profile", lambda sk: "prof")
-    monkeypatch.setattr(features, "extrude", lambda comp, prof, distance, **kwargs: "seed")
-    monkeypatch.setattr(features, "pattern_rectangular", MagicMock(name="pattern_rectangular", return_value="pat"))
+    monkeypatch.setattr(features_warp, "rect", lambda s, a, b: [MagicMock(name=f"l{k}") for k in range(4)])
+    monkeypatch.setattr(features_warp, "fix_point", fix)
+    monkeypatch.setattr(features_warp, "new_sketch", lambda comp, plane, *, label: SimpleNamespace(label=label))
+    monkeypatch.setattr(features_warp, "profile", lambda sk: "prof")
+    monkeypatch.setattr(features_warp, "extrude", lambda comp, prof, distance, **kwargs: "seed")
+    monkeypatch.setattr(features_warp, "pattern_rectangular", MagicMock(name="pattern_rectangular", return_value="pat"))
     axis = SimpleNamespace(geometry=SimpleNamespace(direction=SimpleNamespace(x=1.0, y=1.0, z=1.0)))
     for axis_fn in ("axis_x_through", "axis_y_through", "axis_z_through"):
-        monkeypatch.setattr(features, axis_fn, lambda comp, **kwargs: axis)
+        monkeypatch.setattr(features_axes, axis_fn, lambda comp, **kwargs: axis)
     a, sgn = features.bed_axis(bed)
     bed_mm = 40.0 if sgn > 0 else 0.0  # cube: bed plane is the max or min face on the bed axis
     features._relief_family(
@@ -536,15 +553,15 @@ def test_warp_relief_grooves_routes_length_expr_per_family(monkeypatch: pytest.M
         )
     )
     plane = SimpleNamespace(geometry=SimpleNamespace(normal=SimpleNamespace(x=0.0, y=0.0, z=1.0)))
-    monkeypatch.setattr(features, "axis_plane", lambda comp, axis, expr, value_mm, label: plane)
-    monkeypatch.setattr(features, "set_bed", lambda body, bed: None)
+    monkeypatch.setattr(features_warp, "axis_plane", lambda comp, axis, expr, value_mm, label: plane)
+    monkeypatch.setattr(features_warp, "set_bed", lambda body, bed: None)
     calls: list[tuple[str, dict[str, Any]]] = []
 
     def fake_family(comp: Any, bed_plane: Any, b: Any, along: str, **kwargs: Any) -> list[str]:
         calls.append((along, kwargs))
         return ["f"]
 
-    monkeypatch.setattr(features, "_relief_family", fake_family)
+    monkeypatch.setattr(features_warp, "_relief_family", fake_family)
     out = features.warp_relief_grooves(
         MagicMock(name="comp"),
         body,
@@ -576,14 +593,14 @@ def test_live_seed_centre_starts_from_run_low_edge_when_both_families_live(monke
         )
     )
     plane = SimpleNamespace(geometry=SimpleNamespace(normal=SimpleNamespace(x=0.0, y=0.0, z=1.0)))
-    monkeypatch.setattr(features, "axis_plane", lambda comp, axis, expr, value_mm, label: plane)
-    monkeypatch.setattr(features, "set_bed", lambda body, bed: None)
-    monkeypatch.setattr(features, "new_sketch", lambda comp, plane, *, label: SimpleNamespace(label=label))
-    monkeypatch.setattr(features, "profile", lambda sk: "prof")
-    monkeypatch.setattr(features, "extrude", lambda comp, prof, distance, **kwargs: "seed")
-    monkeypatch.setattr(features, "pattern_rectangular", MagicMock(name="pattern_rectangular", return_value="pat"))
+    monkeypatch.setattr(features_warp, "axis_plane", lambda comp, axis, expr, value_mm, label: plane)
+    monkeypatch.setattr(features_warp, "set_bed", lambda body, bed: None)
+    monkeypatch.setattr(features_warp, "new_sketch", lambda comp, plane, *, label: SimpleNamespace(label=label))
+    monkeypatch.setattr(features_warp, "profile", lambda sk: "prof")
+    monkeypatch.setattr(features_warp, "extrude", lambda comp, prof, distance, **kwargs: "seed")
+    monkeypatch.setattr(features_warp, "pattern_rectangular", MagicMock(name="pattern_rectangular", return_value="pat"))
     seeds: list[Any] = []
-    monkeypatch.setattr(features, "_seed_rect", lambda sk, *corners, **kw: seeds.append(kw["exprs"]))
+    monkeypatch.setattr(features_warp, "_seed_rect", lambda sk, *corners, **kw: seeds.append(kw["exprs"]))
     features.warp_relief_grooves(
         MagicMock(name="comp"),
         body,
@@ -652,9 +669,77 @@ def test_no_family_built_creates_no_bed_plane(monkeypatch: pytest.MonkeyPatch) -
     )
     plane_fn = MagicMock(name="axis_plane")
     bed_fn = MagicMock(name="set_bed")
-    monkeypatch.setattr(features, "axis_plane", plane_fn)
-    monkeypatch.setattr(features, "set_bed", bed_fn)
+    monkeypatch.setattr(features_warp, "axis_plane", plane_fn)
+    monkeypatch.setattr(features_warp, "set_bed", bed_fn)
     out = features.warp_relief_grooves(MagicMock(name="comp"), body, label="t", pitch_mm=30.0)
     assert out == []
     plane_fn.assert_not_called()
     bed_fn.assert_called_once()
+
+
+def _two_axis_body() -> Any:
+    return SimpleNamespace(
+        boundingBox=SimpleNamespace(
+            minPoint=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+            maxPoint=SimpleNamespace(x=100.0, y=100.0, z=1.0),
+        )
+    )
+
+
+def test_expr_only_resolves_float_twins_from_params(monkeypatch: pytest.MonkeyPatch) -> None:
+    # no *_mm passed: initial-placement / validation floats come from user params via expr.evaluate
+    plane = SimpleNamespace(geometry=SimpleNamespace(normal=SimpleNamespace(x=0.0, y=0.0, z=1.0)))
+    names = {
+        "warp_groove_width": 0.4,
+        "warp_groove_depth": 0.3,
+        "warp_groove_margin": 5.0,
+        "warp_groove_target_pitch": 30.0,
+        "top_flange_width": 100.0,
+    }
+    monkeypatch.setattr(features_warp, "eval_fresh", _fresh_mm(names))
+    monkeypatch.setattr(features_warp, "axis_plane", lambda comp, axis, expr, value_mm, label: plane)
+    monkeypatch.setattr(features_warp, "set_bed", lambda body, bed: None)
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_family(comp: Any, bed_plane: Any, b: Any, along: str, **kwargs: Any) -> list[str]:
+        calls.append((along, kwargs))
+        return ["f"]
+
+    monkeypatch.setattr(features_warp, "_relief_family", fake_family)
+    features.warp_relief_grooves(
+        MagicMock(name="comp"),
+        _two_axis_body(),
+        label="warp_t",
+        width_expr="warp_groove_width * 2",
+        depth_expr="warp_groove_depth",
+        length_exprs={"x": "top_flange_width"},
+        run_exprs={"y": ("0 mm", "100 mm")},
+        margin_expr="warp_groove_margin",
+        target_pitch_expr="warp_groove_target_pitch",
+    )
+    kw = dict(calls)["x"]
+    assert kw["width_mm"] == pytest.approx(
+        0.8
+    )  # 0.4 * 2 from expr; default 0.8 would also pass -> depth/margin prove it
+    assert kw["depth_mm"] == pytest.approx(0.3)  # default would be 0.6
+    assert kw["margin_mm"] == pytest.approx(5.0)  # default would be 0.0
+    assert kw["pitch_mm"] == pytest.approx(30.0)
+    assert kw["width_expr"] == "warp_groove_width * 2"
+
+
+def test_expr_only_margin_below_edge_min_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    plane = SimpleNamespace(geometry=SimpleNamespace(normal=SimpleNamespace(x=0.0, y=0.0, z=1.0)))
+    names = {"warp_groove_margin": 2.0, "warp_groove_target_pitch": 30.0, "top_flange_width": 100.0}
+    monkeypatch.setattr(features_warp, "eval_fresh", _fresh_mm(names))
+    monkeypatch.setattr(features_warp, "axis_plane", lambda comp, axis, expr, value_mm, label: plane)
+    monkeypatch.setattr(features_warp, "set_bed", lambda body, bed: None)
+    with pytest.raises(ValueError, match="GROOVE_EDGE_MIN_MM"):
+        features.warp_relief_grooves(
+            MagicMock(name="comp"),
+            _two_axis_body(),
+            label="warp_t",
+            length_exprs={"x": "top_flange_width"},
+            run_exprs={"y": ("0 mm", "100 mm")},
+            margin_expr="warp_groove_margin",
+            target_pitch_expr="warp_groove_target_pitch",
+        )

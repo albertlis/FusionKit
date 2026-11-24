@@ -1519,7 +1519,18 @@ def check_body(
     via print_frame_body; up_rot is applied on top of it. Groove rects (warp_family_mm) exempt only when up_rot is
     identity (rects are design-frame). Groove roofs (geometric, rotated frame) and teardrop notch tops
     (NOTCH_BRIDGE_MAX_MM, flanked) are exempt in any orientation. Short ledges (SHORT_LEDGE_MAX_MM) and bed-adjacent
-    chamfer faces (BED_ADJACENT_MAX_MM, slope >= BED_ADJACENT_MIN_ANGLE_DEG) too. Same bed-at-z=0 assumption as check()."""
+    chamfer faces (BED_ADJACENT_MAX_MM, slope >= BED_ADJACENT_MIN_ANGLE_DEG) too. Same bed-at-z=0 assumption as check().
+
+    Slot ceiling <= SLIT_MAX_MM (0.2 mm) between facing walls is not overhang (slicer closes it);
+    B-rep flat annulus (2 concentric loops) of width <= SLIT_MAX_MM exempt (`_brep_slit_ceiling`).
+    Flat down-facing B-rep bridge (1 planar loop, or annulus) with min in-plane width <=
+    SHORT_BRIDGE_MAX_MM (1.0 mm) exempt ONLY if supported: both long sides (edges at both ends of
+    the min-width span) border a face going below the bridge plane (bbox minZ < bridge z - 0.1 mm);
+    annulus: every edge of both loops supported. Cantilever (unsupported) stays flagged
+    (`_brep_short_bridge`; user P25 2026-11-17). Short cantilever (P26): planar down-facing 1-loop
+    face with reach <= 1.0 mm (`CANTILEVER_MAX_MM`) from one supported edge's line exempt
+    (`_brep_short_cantilever`).
+    """
     pbody = print_frame_body(body)
     mesh = mesh_from_body(pbody, quality)
     ident = _is_identity(up_rot)
