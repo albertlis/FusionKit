@@ -1,6 +1,6 @@
 {
   "name": "fusion-kit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Autodesk Fusion helpers (fusion_kit) with FDM (PETG) print checks: DfAM rules, overhang tests, Fusion MCP wiring, CAD review agents.",
   "author": {
     "name": "albertlis"
