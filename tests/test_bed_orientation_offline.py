@@ -11,8 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from fusion_kit import dfam, features
-from fusion_kit import features_bed
+from fusion_kit import dfam, features, features_bed
 
 Normal = tuple[float, float, float]
 
@@ -42,9 +41,9 @@ def _run(monkeypatch: pytest.MonkeyPatch, normals: list[Normal], **kw: Any) -> t
 
     def edges(_body: Any, _only: bool, bed: str) -> list[Any]:
         seen.append(bed)
-        return [MagicMock(), MagicMock()]
+        return [(True, [MagicMock(), MagicMock()])]
 
-    monkeypatch.setattr(features_bed, "_bed_outer_edges", edges)
+    monkeypatch.setattr(features_bed, "_bed_loops", edges)
     monkeypatch.setattr(features_bed, "_bed_dihedral_deg", lambda _e, _b: 90.0)
     features.bed_chamfer(comp, MagicMock(), "1 mm", label="bed_t", **kw)
     return comp, seen
@@ -90,7 +89,7 @@ def test_bed_chamfer_records_bed_on_body(monkeypatch: pytest.MonkeyPatch) -> Non
     f = MagicMock()
     f.faces = [_face(_normal_on(0, 0.695))]
     comp.features.chamferFeatures.add.side_effect = [f]
-    monkeypatch.setattr(features_bed, "_bed_outer_edges", lambda _b, _o, _bed: [MagicMock()])
+    monkeypatch.setattr(features_bed, "_bed_loops", lambda _b, _o, _bed: [(True, [MagicMock()])])
     monkeypatch.setattr(features_bed, "_bed_dihedral_deg", lambda _e, _b: 90.0)
     features.bed_chamfer(comp, body, "1 mm", label="bed_t", bed="+x")
     body.attributes.add.assert_called_once_with("dfam", "bed", "+x")

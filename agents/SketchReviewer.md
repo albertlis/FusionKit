@@ -79,7 +79,7 @@ Ranking: under-constrained sketch first (cannot be edited parametrically), then 
 
 ### 2a. Sketch smells → constraint replacement
 
-Helper status: `present` = in `docs/fusion_kit_api.md`; a helper not in the index = FUSION_KIT GAP.
+Helper status: `present` = has a row in `docs/api/<module>.md`; a helper with no row = FUSION_KIT GAP.
 
 | Smell in dump | Replacement | fusion_kit helper | Status |
 |---|---|---|---|

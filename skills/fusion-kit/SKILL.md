@@ -55,7 +55,7 @@ def run(_context):
 ## 4. Workflow
 
 1. **Ask first.** Before modelling, get the mating dimensions (plug, board, cable, pins), the layout options, and any user-visible fit or clearance values. Never invent fit values. If there are 2 or more layout options, list them and let the user choose before geometry.
-2. **Read the helper index** `${CLAUDE_PLUGIN_ROOT}/docs/fusion_kit_api.md` before writing any `parts/` code or execute script. Use a helper when a row fits. Raw `adsk` only when no row fits (section 7).
+2. **Read the helper index** `${CLAUDE_PLUGIN_ROOT}/docs/fusion_kit_api.md`, then only the card `${CLAUDE_PLUGIN_ROOT}/docs/api/<module>.md` of each module you use, before writing any `parts/` code or execute script. Use a helper when a row fits. Raw `adsk` only when no row fits (section 7).
 3. **Parameters.** Model every dimension as a User Parameter with an expression (`ValueInput.createByString`, `dim.parameter.expression`). Internal units are cm. Use `user_params.ensure_params`. Declare each live-edit range as the 4th PARAMS item: `("5 mm", "mm", "comment", {"min": "2 mm", "max": "9 mm"})`, or `{"values": ["0", "1"]}` for enum-like params, or `{"no_geometry": True}` when the param only drives text. `build_and_check` sweeps only with `sweep=True` (off per build). At the done-gate pass `params=PARAMS, sweep=True` (`DFAM_FAIL param_sweep` on a break or a no-op edit). Never read a parameter in Python (`sketch.mm`, `eval_fresh`, `.value`) to build geometry: that is build-only (`BUILD_ONLY_PARAM`, see `docs/gotchas.md`).
 4. **Name every timeline item.** `label=` is mandatory in fusion_kit builders: snake_case role, sketches end in `_sketch`. Raw entities get `timeline.set_label`.
 5. **Static check before `execute`.** Run `uvx basedpyright <files>`. Use no `# type: ignore` and no `cast(Any)`. Fix the root cause. Prefer `list` and `|` to `List` and `Union`.
@@ -94,6 +94,8 @@ Build with the fewest features and sketches. A model that repeats the same step 
 | Known Fusion behaviour | fusion-cad `find_gotcha` (before guessing), `find_pattern`, `find_api`, `search_docs` |
 
 Unknown Fusion behaviour: call `find_gotcha` first. Unknown API: read `apiDocumentation` with `fusion_mcp_read`. Do not guess.
+
+**Build graph first.** After `build_and_check`, read the `GRAPH <path>.txt items=N flags=M changed=K` line, then `fk_graph_<name>.txt`: one row per timeline item with status and `src`, then a `!!` line grouping rule flags (`changed` counts diffs vs the previous build). Open the part script only at the row's `src` (`<script>.py:<line>`). For a live dump of the active design, run `graph.run` in a `readOnly` `fusion_mcp_execute` via `run_part(os.path.join(fk, "fusion_kit", "graph.py"), "")`, not ad-hoc timeline walks. Workflow: `${CLAUDE_PLUGIN_ROOT}/docs/workflow.md`.
 
 ## 7. Gotchas
 

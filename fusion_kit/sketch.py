@@ -12,6 +12,7 @@ docs/gotchas.md gotchas encoded here
 """
 
 import contextlib
+import math
 from collections.abc import Iterator
 
 import adsk.core
@@ -79,8 +80,13 @@ def circle(
     r: float,
     z: float | str | Ex = 0.0,
     diameter: str | Ex | None = None,
+    *,
+    concentric_to: adsk.fusion.SketchCircle | adsk.fusion.SketchArc | None = None,
 ) -> adsk.fusion.SketchCircle:
     """Circle centred at MODEL point (x, y, z), radius r mm. diameter -> parametric diameter dim.
+
+    concentric_to (opt-in): centre = centre of that SketchCircle / SketchArc, tied by addConcentric. x, y, z are then
+    unused (no centre position dims from them); radius and diameter dim behave as before.
 
     x, y, z: mm float, or expression string / Ex. Expressions are evaluated here for the INITIAL drawn position only;
     the parametric position comes from anchor() / fix_point(). Part code: circle(s, "cx_expr", "cy_expr", r) — no mm().
@@ -92,11 +98,16 @@ def circle(
     The centre is projected onto the sketch plane (sketch z = 0): on an offset plane a model point off the plane
     keeps a nonzero sketch z, the circle floats off-plane and its extrude starts there (cut misses the body).
     """
-    c0 = to_sketch(s, _centre_mm(x), _centre_mm(y), _centre_mm(z))
+    if concentric_to is None:
+        c0 = to_sketch(s, _centre_mm(x), _centre_mm(y), _centre_mm(z))
+    else:
+        c0 = concentric_to.centerSketchPoint.geometry
     k = s.sketchCurves.sketchCircles.count
     cx = c0.x + _jitter_offset(k, 0) / 10
     cy = c0.y + _jitter_offset(k, 1) / 10
     c = s.sketchCurves.sketchCircles.addByCenterRadius(P3(cx, cy, 0.0), r / 10)
+    if concentric_to is not None:
+        s.geometricConstraints.addConcentric(c, concentric_to)
     if diameter is not None:
         g = c.centerSketchPoint.geometry
         s.sketchDimensions.addDiameterDimension(c, P3(g.x + r / 10, g.y + r / 10, 0)).parameter.expression = as_str(
@@ -244,6 +255,46 @@ def dim_from(
             dim(s, ref, p, e, VERTICAL_DIM)
         else:
             raise ValueError(f"dim_from: model direction {u} is not along a sketch axis (dx={dx}, dy={dy} cm)")
+
+
+def polar_point(
+    s: adsk.fusion.Sketch,
+    centre_point: adsk.fusion.SketchPoint,
+    radius_expr: str | Ex,
+    angle_expr: str | Ex,
+    *,
+    radius_mm: float,
+    angle_deg: float,
+) -> adsk.fusion.SketchPoint:
+    """Sketch point at polar offset (radius_expr, angle_expr) from centre_point. Fully constrained by its 2 dims.
+
+    radius_mm / angle_deg: current values, initial geometry only (dims re-solve it, as fillet_corner radius_mm).
+    angle_expr: unsigned, from sketch +X counter-clockwise, in (0, 180) deg, e.g. "30 deg".
+    Build: construction reference line centre -> (+X, radius), made horizontal, end dimensioned by radius_expr
+    (horizontal dim); construction radial line centre -> point, point dimensioned by radius_expr (aligned) and an angular
+    dim (reference line vs radial line) bound to angle_expr. Returns the live point (radial line end).
+    """
+    if not 0.0 < angle_deg < 180.0:
+        raise ValueError(f"polar_point: angle_deg must be in (0, 180), got {angle_deg}")
+    g = centre_point.geometry
+    lines = s.sketchCurves.sketchLines
+    k = lines.count
+    rc = radius_mm / 10
+    a = math.radians(angle_deg)
+    ref = lines.addByTwoPoints(centre_point, P3(g.x + rc, g.y, 0.0))
+    ref.isConstruction = True
+    s.geometricConstraints.addHorizontal(ref)
+    dim(s, centre_point, ref.endSketchPoint, radius_expr, HORIZONTAL_DIM)
+    rad = lines.addByTwoPoints(
+        centre_point,
+        P3(g.x + rc * math.cos(a) + _jitter_offset(k, 0) / 10, g.y + rc * math.sin(a) + _jitter_offset(k, 1) / 10, 0.0),
+    )
+    rad.isConstruction = True
+    p = rad.endSketchPoint
+    dim(s, centre_point, p, radius_expr)
+    ang = s.sketchDimensions.addAngularDimension(ref, rad, P3(g.x + rc / 2, g.y + rc / 2, 0.0))
+    ang.parameter.expression = as_str(angle_expr)
+    return p
 
 
 def _mm_expr(v: float) -> str:
@@ -468,6 +519,83 @@ def model_axis_to_sketch(s: adsk.fusion.Sketch, model_axis: int) -> int:
     return 0 if abs(q.x - o.x) > abs(q.y - o.y) else 1
 
 
+SegPlan = tuple[int, int, int]  # (link sketch axis, length sketch axis, length model axis)
+
+
+def _segment_plan(s: adsk.fusion.Sketch, pts: list[Pt]) -> list[SegPlan]:
+    """mode="segments": SegPlan per edge j (vertex j -> j+1 mod n). Only axis-parallel edges accepted.
+
+    Exactly one in-plane coord expr equal at both ends -> H/V link on that sketch axis; the other in-plane model axis is
+    the length. Diagonal edge (both coords differ, or both equal) -> ValueError: an angle constraint would be needed.
+    """
+    n = len(pts)
+    axes = _in_plane_axes(s)
+    plan: list[SegPlan] = []
+    for j in range(n):
+        a, b = pts[j], pts[(j + 1) % n]
+        eq = [k for i, k in axes if _norm_expr(a[i]) == _norm_expr(b[i])]
+        ln = [(i, k) for i, k in axes if _norm_expr(a[i]) != _norm_expr(b[i])]
+        if len(eq) != 1 or len(ln) != 1:
+            raise ValueError(
+                f"param_poly mode='segments': edge {j} is not axis-parallel (exactly one in-plane coord expr equal at both ends)"
+            )
+        plan.append((eq[0], ln[0][1], ln[0][0]))
+    return plan
+
+
+def _segments_dims(
+    s: adsk.fusion.Sketch, pts: list[Pt], lines: list[adsk.fusion.SketchLine], plan: list[SegPlan]
+) -> None:
+    """mode="segments" constraints: H/V link per edge, one length dim per edge, first vertex anchored by fix_point.
+
+    One union-find graph per sketch axis: nodes = vertex coordinates + sketch origin; links and length dims are edges.
+    A length dim whose ends are already joined is redundant (it would over-constrain) and is not added. Afterwards every
+    vertex coordinate must reach the origin, else ValueError (under-constrained).
+    """
+    n = len(pts)
+    parent = list(range(2 * n + 2))  # node 2*v + k: vertex v, sketch axis k; node 2*n + k: origin on axis k
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def join(x: int, y: int) -> bool:
+        rx, ry = find(x), find(y)
+        if rx == ry:
+            return False
+        parent[ry] = rx
+        return True
+
+    fix_point(s, lines[0].startSketchPoint, pts[0])
+    join(0, 2 * n)
+    join(1, 2 * n + 1)
+    gc = s.geometricConstraints
+    for j, (k_link, _k_len, _i_len) in enumerate(plan):
+        nxt = (j + 1) % n
+        if not join(2 * j + k_link, 2 * nxt + k_link):
+            raise ValueError(f"param_poly mode='segments': link on edge {j} is redundant")
+        if k_link == 1:
+            gc.addHorizontal(lines[j])
+        else:
+            gc.addVertical(lines[j])
+    for j, (_k_link, k_len, i_len) in enumerate(plan):
+        nxt = (j + 1) % n
+        if not join(2 * j + k_len, 2 * nxt + k_len):
+            continue  # ends already fixed relative to each other: this length is implied, dim would over-constrain
+        a, b = pts[j][i_len], pts[nxt][i_len]
+        va, vb = mm(a), mm(b)
+        if abs(vb - va) < 1e-9:
+            raise ValueError(f"param_poly mode='segments': edge {j} has zero length")
+        expr = f"({b}) - ({a})" if vb > va else f"({a}) - ({b})"
+        dim(s, lines[j].startSketchPoint, lines[j].endSketchPoint, expr, HORIZONTAL_DIM if k_len == 0 else VERTICAL_DIM)
+    for k in (0, 1):
+        for v in range(n):
+            if find(2 * v + k) != find(2 * n + k):
+                raise ValueError(f"param_poly mode='segments': vertex {v} axis {k} not fixed (under-constrained)")
+
+
 def param_poly(
     s: adsk.fusion.Sketch,
     pts: list[Pt],
@@ -475,8 +603,12 @@ def param_poly(
     jitter_mm: float = JITTER_MM,
     hv: bool = False,
     skip_axes: list[frozenset[int]] | None = None,
+    mode: str = "vertices",
 ) -> list[adsk.fusion.SketchLine]:
     """Closed polygon, every vertex dimensioned to its model-coordinate expressions (fully constrained).
+
+    mode="segments" (opt-in, axis-parallel edges only): H/V link per edge, one length dim per edge (redundant ones
+    skipped, see _segments_dims), only the first vertex anchored by coordinate dims. hv / skip_axes not allowed.
 
     hv=True (opt-in): an edge whose endpoints carry the same coordinate expr (whitespace-insensitive string) on an
     in-plane axis gets addHorizontal / addVertical, and that coordinate is dimensioned once per linked set instead of
@@ -493,6 +625,11 @@ def param_poly(
     """
     if skip_axes is not None and (hv or len(skip_axes) != len(pts)):
         raise ValueError("param_poly: skip_axes needs hv=False and one entry per vertex")
+    if mode not in ("vertices", "segments"):
+        raise ValueError(f"param_poly: mode must be 'vertices' or 'segments', got {mode!r}")
+    if mode == "segments" and (hv or skip_axes is not None):
+        raise ValueError("param_poly: mode='segments' takes neither hv nor skip_axes")
+    seg_plan = _segment_plan(s, pts) if mode == "segments" else None
     o = to_sketch(s, 0.0, 0.0, 0.0)
     units = [
         to_sketch(s, 1.0, 0.0, 0.0),
@@ -512,6 +649,9 @@ def param_poly(
     }  # constraints already on the sketch (user, earlier polygons)
     lines = poly(s, vals)
     _drop_inferred(s, before)  # inferred alignments would fight the vertex dims
+    if seg_plan is not None:
+        _segments_dims(s, pts, lines, seg_plan)
+        return lines
     if not hv:
         for ln, p, sk in zip(lines, pts, skip_axes or [frozenset()] * len(pts)):
             fix_point(s, ln.startSketchPoint, p, skip_axes=sk)

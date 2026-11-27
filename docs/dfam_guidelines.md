@@ -98,6 +98,10 @@ Printed peg standing on a plate (peg axis = print Z): layers are perpendicular t
 - Warp-groove exemption (`dfam.in_warp_groove`, shared predicate): a bed rim edge (`bed_chamfer`) or vertical corner (`vertical_corner`) lying in a warp-groove footprint (gap width 0.6–1.0 mm, same ±25 % as above; blind slot loops too) at z ≤ bed + 0.5 mm is not FAIL. Recess-gap strip ends extend to the body footprint only when within `WARP_END_INSET_MAX_MM` (2.0 mm) of it (plate edge / bed chamfer zone); a collinear notch 10 mm past a strip end stays FAIL. Only a qualifying family counts: ≥ 2 parallel grooves on the bed (`_warp_family`). A lone slot or a single gap / two pads 0.8 mm apart never exempt. A 0.8 mm groove cannot take a 1 mm chamfer or 3 mm fillet. Outer corners and edges above the band still FAIL. Not checked by any rule: groove depth 0.3 mm, pitch 30 mm.
 - Groove ceiling exemption (`printability.check(exempt_rects=...)`, default None = none; `check_body` passes `dfam.warp_family_mm(body)` for identity orientation only; `sweep` passes it to the identity candidate only): a down-facing triangle with all 3 vertices inside ONE qualifying groove rect (`dfam.in_groove_rect`: z ≤ bed + 0.5 mm, rect width 0.6–1.0 mm, footprint grown by 0.05 mm) is not an overhang. Triangle bbox is never used. Rotated orientations keep the groove ceiling as overhang (rects are design frame). Hanging-edge and floating-point checks are not changed by this exemption.
 
+## Warp groove order (feature_quality, WARN `warp_not_last`)
+
+- Grooves last: warp relief grooves are the last features of a body, after all features incl. bed chamfer. Any later fillet / chamfer / extrude / revolve / combine / pattern / mirror on that body WARNs at that feature. Groove = `WARP_GROOVE_ATTR` tag (`features.warp_relief_grooves`), fallback name contains `warp`.
+
 ## Bed orientation (print frame)
 
 - Body attribute `("dfam", "bed")`: `-z` (absent = default), `+z`, `-x`, `+x`, `-y`, `+y`. `+x` = bed is the X-max face (outward normal +X). Written by `features.bed_chamfer(bed=)` and `features.warp_relief_grooves(bed=)` via `dfam.set_bed`; read by `dfam.bed_from_body`.

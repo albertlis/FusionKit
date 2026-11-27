@@ -41,6 +41,7 @@ TOKEN = re.compile(r"`(!?[A-Za-z_][\w.]*)`")
 STRICT = "!"
 HELPER = re.compile(r"[A-Za-z_][\w.]*")
 DOCS_REL = Path("docs") / "fusion_kit_api.md"
+API_DIR = "api"  # per-module cards docs/api/<module>.md hold the rows
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REPO_NORM = str(REPO_ROOT).replace("\\", "/").lower()
 MARK_PREFIX = "claude-fusion-nudge-deny-"
@@ -97,12 +98,26 @@ def parse_table(text: str) -> dict[str, list[str]]:
     return parse_index(text)[0]
 
 
+def read_part(path: Path, label: str) -> str | None:
+    """One doc file. Unreadable or not UTF-8 -> stderr warning line and None: only this file is skipped."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"fusion_kit_nudge: skipped {label}: {type(exc).__name__}", file=sys.stderr)
+        return None
+
+
 def load_index(paths: list[Path]) -> tuple[dict[str, list[str]], frozenset[str]] | None:
+    """Index plus every module card in the sibling api/ dir: rows live in the cards. Bad file -> skipped, others load."""
     for path in paths:
-        try:
-            index = parse_index(path.read_text(encoding="utf-8"))
-        except OSError:
+        text = read_part(path, DOCS_REL.as_posix())
+        if text is None:
             continue
+        for card in sorted((path.parent / API_DIR).glob("*.md")):
+            part = read_part(card, f"docs/{API_DIR}/{card.name}")
+            if part is not None:
+                text += "\n" + part
+        index = parse_index(text)
         if index[0]:
             return index
     return None

@@ -241,6 +241,11 @@ class _FakeExtInput:
         return True
 
 
+def _attrs_stub() -> SimpleNamespace:
+    """Fusion entity .attributes: nothing stored, add() is a no-op. set_label -> _tag_source needs it."""
+    return SimpleNamespace(itemByName=lambda g, n: None, add=lambda g, n, v: None)
+
+
 class _FakeExtrudes:
     def __init__(self, inp: _FakeExtInput) -> None:
         self.inp = inp
@@ -251,7 +256,7 @@ class _FakeExtrudes:
         return self.inp
 
     def add(self, inp: object) -> SimpleNamespace:
-        return SimpleNamespace(inp=inp)  # set_label assigns .name: needs an object, not a tuple
+        return SimpleNamespace(inp=inp, attributes=_attrs_stub())  # set_label assigns .name and reads .attributes
 
 
 def _comp(inp: _FakeExtInput) -> tuple[Any, _FakeExtrudes]:
@@ -348,7 +353,9 @@ def _extrude_comp(inp: _FakeExtInput, bodies_out: list[Any]) -> Any:
     """comp whose extrude add() returns a feature exposing bodies.item(0) = bodies_out[0]."""
     ext = MagicMock(name="extrudeFeatures")
     ext.createInput.return_value = inp
-    ext.add.return_value = SimpleNamespace(bodies=SimpleNamespace(count=len(bodies_out), item=lambda i: bodies_out[i]))
+    ext.add.return_value = SimpleNamespace(
+        bodies=SimpleNamespace(count=len(bodies_out), item=lambda i: bodies_out[i]), attributes=_attrs_stub()
+    )
     return SimpleNamespace(features=SimpleNamespace(extrudeFeatures=ext), bRepBodies=["A", "B"])
 
 
@@ -424,7 +431,7 @@ class _FakeRevInput:
 def _rev_comp(inp: _FakeRevInput) -> Any:
     rf = MagicMock(name="revolveFeatures")
     rf.createInput.return_value = inp
-    rf.add.return_value = SimpleNamespace(name="Revolve1")
+    rf.add.return_value = SimpleNamespace(name="Revolve1", attributes=_attrs_stub())
     return SimpleNamespace(features=SimpleNamespace(revolveFeatures=rf), bRepBodies=["A", "B"])
 
 
@@ -1124,6 +1131,7 @@ def test_rotate_body_about_y_axis_in_root_move_in_sub_comp(
 class _Named:
     def __init__(self, name: str) -> None:
         self.name = name
+        self.attributes = _attrs_stub()
         self.deleted = False
 
     def deleteMe(self) -> None:

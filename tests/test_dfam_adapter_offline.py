@@ -213,7 +213,7 @@ def test_dfam_check_fail_as_warn_downgrades_fail_only(
         vertical_wall_mm=[],
         has_cavity=False,
     )
-    monkeypatch.setattr(dfam_body, "facts_from_body", lambda body, tags=None: (bf, [], []))
+    monkeypatch.setattr(dfam_body, "facts_from_body", lambda body, tags=None, bed_loop_centres=None: (bf, [], []))
     body = MagicMock(attributes=_Attrs())
     assert [(f.rule, f.level) for f in dfam_check(body)] == [("warp_grooves", "FAIL")]
     assert [(f.rule, f.level) for f in dfam_check(body, fail_as_warn=True)] == [("warp_grooves", "WARN")]

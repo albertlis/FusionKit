@@ -63,11 +63,13 @@ EdgeTreatment = Literal["sharp", "fillet", "chamfer"]
 Vec = tuple[float, float, float]
 
 DFAM_GROUP = "dfam"
+WARP_GROOVE_ATTR = "warp_groove"  # feature attr in DFAM_GROUP: warp groove sketch / cuts / patterns (features_warp tags; param_sweep, feature_quality read)
 MATING_ATTR = "mating"
 GRIP_FIN_ATTR = "grip_fin"  # face attr in DFAM_GROUP: grip_fit fin side / tip faces (same name as grip_fit tag)
 GRIP_FIN_SECTION_ATTR = "grip_fin_min_section"  # body attr in DFAM_GROUP: grip_fit min fin width over lead-in band (mm)
 SKIP_ATTR = "dfam_skip"
 BED_ATTR = "bed"  # body attr in DFAM_GROUP: print bed direction; absent = "-z" (min-Z face)
+BED_LOOP_SKIP_ATTR = "bed_loop_skip"  # body attr in DFAM_GROUP: "x,y,z;..." mm centres (original frame) of inner bed loops bed_chamfer(inner_loops) left sharp
 BedDir = Literal["-z", "+z", "-x", "+x", "-y", "+y"]  # '+x' = bed is the X-max face (outward normal +X)
 BED_DIRS: tuple[str, ...] = ("-z", "+z", "-x", "+x", "-y", "+y")
 

@@ -115,7 +115,7 @@ def test_dfam_check_tags_messages_on_non_z_bed(monkeypatch: pytest.MonkeyPatch) 
     frame_body: Any = object()  # stands in for the print-frame copy
     facts_arg: list[Any] = []
 
-    def fake_facts(b: Any, tags: Any = None) -> tuple[str, list[Any], list[Any]]:
+    def fake_facts(b: Any, tags: Any = None, bed_loop_centres: Any = None) -> tuple[str, list[Any], list[Any]]:
         facts_arg.append(b)
         return ("fact", [], [])
 
@@ -133,7 +133,7 @@ def test_dfam_check_tags_messages_on_non_z_bed(monkeypatch: pytest.MonkeyPatch) 
 def test_dfam_check_plain_z_bed_untagged(monkeypatch: pytest.MonkeyPatch) -> None:
     body: Any = MagicMock()
     body.attributes.itemByName.return_value = None
-    monkeypatch.setattr(dfam_body, "facts_from_body", lambda b, tags=None: ("fact", [], []))
+    monkeypatch.setattr(dfam_body, "facts_from_body", lambda b, tags=None, bed_loop_centres=None: ("fact", [], []))
     monkeypatch.setattr(
         dfam_body, "check_all", lambda fact, holes, edges, skip: [dfam.Finding("bed_chamfer", "FAIL", "e")]
     )
@@ -162,7 +162,7 @@ def test_seed_rect_plus_x_passes_model_points(monkeypatch: pytest.MonkeyPatch) -
 
 
 # ---------------------------------------------------------------------------
-# _relief_family on bed '+x': seed corners in sketch coords, sign-flipped sketch x
+# _literal_grooves on bed '+x': seed corners in sketch coords, sign-flipped sketch x
 # ---------------------------------------------------------------------------
 def _plate_body() -> Any:
     # cm: x 0..0.7 (7 mm, thin), y 0..10 (100 mm span), z 0..3.5 (35 mm span); bed = X-max face
@@ -174,66 +174,51 @@ def _plate_body() -> Any:
     )
 
 
-def _family(monkeypatch: pytest.MonkeyPatch, **kw: Any) -> tuple[MagicMock, list[tuple[Any, ...]], list[str]]:
-    direction = SimpleNamespace(x=0.0, y=1.0, z=0.0)
-    axis = SimpleNamespace(geometry=SimpleNamespace(direction=direction))
-    monkeypatch.setattr(features_axes, "axis_y_through", lambda comp, **kwargs: axis)
-    monkeypatch.setattr(features_warp, "new_sketch", lambda comp, plane, *, label: SimpleNamespace(label=label))
-    corners: list[tuple[Any, ...]] = []
-    monkeypatch.setattr(features_warp, "_seed_rect", lambda sk, *c, **kw: corners.append(c))
-    monkeypatch.setattr(features_warp, "profile", lambda sk: "prof")
-    dists: list[str] = []
-
-    def fake_extrude(comp: Any, prof: Any, distance: str, **kwargs: Any) -> str:
-        dists.append(distance)
-        return "seed"
-
-    monkeypatch.setattr(features_warp, "extrude", fake_extrude)
-    pat = MagicMock(name="pattern_rectangular", return_value="pat")
-    monkeypatch.setattr(features_warp, "pattern_rectangular", pat)
-    features._relief_family(
-        MagicMock(name="comp"),
-        MagicMock(name="bed"),
+def _literal_calls(monkeypatch: pytest.MonkeyPatch, along: Any) -> list[tuple[tuple[Any, ...], dict[str, Any]]]:
+    """_literal_grooves on the plate body, bed '+x' (bed plane x = 7 mm): (seed rect args, kwargs) per groove rect."""
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    monkeypatch.setattr(features_warp, "_seed_rect", lambda sk, *c, **kw: calls.append((c, kw)))
+    features_warp._literal_grooves(
+        MagicMock(name="sketch"),
         _plate_body(),
-        "y",
-        label="t",
+        along,
         width_mm=0.8,
-        depth_mm=0.3,
         pitch_mm=30.0,
-        **kw,
+        bed_dir="+x",
+        bed_mm=7.0,
+        width_expr=None,
+        run_expr=None,
     )
-    return pat, corners, dists
+    return calls
 
 
-def test_relief_family_plus_x_maps_corners_to_sketch(monkeypatch: pytest.MonkeyPatch) -> None:
-    pat, corners, _dists = _family(monkeypatch, bed_dir="+x")
-    x0, y0, x1, y1 = corners[0]
+def test_literal_plus_x_maps_corners_to_sketch(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _literal_calls(monkeypatch, "y")
+    assert len(calls) == 3  # 100 mm span -> centres -30, 0, 30
+    x0, y0, x1, y1 = calls[0][0]
     # bed '+x': in-plane model axes y (lower index, spacing: 19.6..20.4, centre 20 = 50 - 30) and z (run:
     # -1.0..36.0 mm with 1 mm overrun)
     assert (x0, x1) == pytest.approx((19.6, 20.4))
     assert (y0, y1) == pytest.approx((-1.0, 36.0))
-    assert pat.call_args.args[3] == "3"
-    assert pat.call_args.args[4] == "30.000000 mm"
 
 
-def test_relief_family_depth_sign_flips_cut(monkeypatch: pytest.MonkeyPatch) -> None:
-    _pat, _corners, dists = _family(monkeypatch, bed_dir="+x", depth_sign=-1)
-    assert dists == ["-0.300000 mm"]
+def test_depth_text_sign_flips_cut() -> None:
+    assert features_warp._depth_text(-1, 0.3, None) == "-0.300000 mm"
 
 
-def test_relief_family_rejects_normal_axis() -> None:
-    # family along x is normal to bed '+x': no seed, clear error before any Fusion call
+def test_literal_rejects_normal_axis() -> None:
+    # family along x is normal to bed '+x': no rect, clear error before any Fusion call
     with pytest.raises(ValueError, match="normal"):
-        features._relief_family(
-            MagicMock(),
+        features_warp._literal_grooves(
             MagicMock(),
             _plate_body(),
             "x",
-            label="t",
             width_mm=0.8,
-            depth_mm=0.3,
             pitch_mm=30.0,
             bed_dir="+x",
+            bed_mm=7.0,
+            width_expr=None,
+            run_expr=None,
         )
 
 
@@ -251,17 +236,26 @@ def test_warp_relief_grooves_plus_x_plumbing(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(features_warp, "axis_plane", fake_axis_plane)
     monkeypatch.setattr(features_warp, "check_label", lambda label: None)
-    fam_calls: list[tuple[str, int, str]] = []
+    lit_calls: list[tuple[str, str]] = []
 
-    def fake_family(comp: Any, bed: Any, b: Any, along: str, **kw: Any) -> list[str]:
-        fam_calls.append((along, kw["depth_sign"], kw["bed_dir"]))
-        return [f"{along}_feat"]
+    def fake_literal(s: Any, b: Any, along: str, **kw: Any) -> None:
+        lit_calls.append((along, kw["bed_dir"]))
 
-    monkeypatch.setattr(features_warp, "_relief_family", fake_family)
+    monkeypatch.setattr(features_warp, "_literal_grooves", fake_literal)
+    monkeypatch.setattr(features_warp, "new_sketch", lambda comp, plane, *, label: SimpleNamespace(label=label))
+    monkeypatch.setattr(features_warp, "profiles", lambda sk: ["p"])
+    cut_calls: list[tuple[Any, ...]] = []
+
+    def fake_extrude(comp: Any, prof: Any, distance: str, **kw: Any) -> str:
+        cut_calls.append((prof, distance, kw["op"], kw["label"]))
+        return "cut"
+
+    monkeypatch.setattr(features_warp, "extrude", fake_extrude)
     out = features.warp_relief_grooves(MagicMock(name="comp"), body, label="warp", bed="+x")
     assert axis_calls == [("x", "7.000000 mm", 7.0, "warp_bed")]
-    assert fam_calls == [("y", -1, "+x"), ("z", -1, "+x")]
-    assert out == ["y_feat", "z_feat"]
+    assert lit_calls == [("y", "+x")]  # z span 35 mm <= 35: no groove, no rects
+    assert cut_calls == [(["p"], "-0.600000 mm", "cut", "warp_y")]  # depth_sign -1 (plane normal +X), default depth 0.6
+    assert out == ["cut"]
     body.attributes.add.assert_called_once_with("dfam", "bed", "+x")
 
 
@@ -276,7 +270,7 @@ def test_dfam_check_warns_only_when_tagged_face_unmapped(monkeypatch: pytest.Mon
     body.attributes.itemByName.side_effect = lambda grp, name: SimpleNamespace(value="+x") if name == "bed" else None
     tags_seen: list[Any] = []
 
-    def fake_facts(b: Any, tags: Any = None) -> tuple[str, list[Any], list[Any]]:
+    def fake_facts(b: Any, tags: Any = None, bed_loop_centres: Any = None) -> tuple[str, list[Any], list[Any]]:
         tags_seen.append(tags)
         return ("fact", [], [])
 
@@ -296,7 +290,7 @@ def test_dfam_check_no_bed_frame_warn_when_all_tags_mapped(monkeypatch: pytest.M
     body: Any = MagicMock()
     body.attributes.itemByName.side_effect = lambda grp, name: SimpleNamespace(value="+x") if name == "bed" else None
     monkeypatch.setattr(dfam_body, "print_frame_with_tags", lambda b: (object(), {"mating": frozenset({1})}, []))
-    monkeypatch.setattr(dfam_body, "facts_from_body", lambda b, tags=None: ("fact", [], []))
+    monkeypatch.setattr(dfam_body, "facts_from_body", lambda b, tags=None, bed_loop_centres=None: ("fact", [], []))
     monkeypatch.setattr(dfam_body, "check_all", lambda fact, holes, edges, skip: [])
     monkeypatch.setattr(dfam_body, "skip_from_body", lambda b: {})
     assert dfam.dfam_check(body) == []

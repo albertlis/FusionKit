@@ -53,7 +53,7 @@ claude plugin validate .
 
 For a new or changed public helper (module-level def without a leading `_`):
 
-1. Row in `docs/fusion_kit_api.md` with signature and the raw adsk tokens it wraps. `tests/test_api_index_offline.py` enforces the format.
+1. Row in `docs/api/<module>.md` (module card) with signature and the raw adsk tokens it wraps. `tests/test_api_index_offline.py` enforces the format.
 2. Offline test in `tests/` that fails on the bug it targets.
 3. Live smoke test in `tests/smoke/` if the helper touches geometry.
 4. Verified Fusion behaviour: entry in `docs/gotchas.md` with a "measured" note. Record only what you measured.

@@ -301,7 +301,7 @@ def axis_by_cylinder(
     if not inp.setByCircularFace(face):
         raise RuntimeError("axis_by_cylinder: face is not cylindrical / conical / toroidal")
     axis = comp.constructionAxes.add(inp)
-    axis.name = check_label(label)  # set_label() types exclude ConstructionAxis; same as _axis_by_planes
+    set_label(axis, label)
     return axis
 
 

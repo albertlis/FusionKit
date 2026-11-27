@@ -365,7 +365,7 @@ Build steps: [demo README](examples/demo_bracket/README.md).
 | `component`, `view`, `enums` | Sub-components, view orientation, PNG screenshots, typed enums. |
 | `report`, `printability`, `dfam` | Self-check line, probes, interference, overhangs, FDM rule scan. |
 
-Every public helper is listed with its signature in [`docs/fusion_kit_api.md`](docs/fusion_kit_api.md). An offline test checks the format of every row.
+Every public helper is listed with its signature in a per-module card under [`docs/api/`](docs/api/); [`docs/fusion_kit_api.md`](docs/fusion_kit_api.md) is the index. An offline test checks the format of every row.
 
 ## 🧠 How we work with Claude
 

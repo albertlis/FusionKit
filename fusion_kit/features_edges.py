@@ -309,6 +309,51 @@ def chamfer(
     return feat
 
 
+def fillet_groups(
+    comp: adsk.fusion.Component,
+    groups: list[tuple[list[adsk.fusion.BRepEdge], str | Ex]],
+    *,
+    tangent_chain: bool = False,
+    label: str,
+) -> adsk.fusion.FilletFeature:
+    """One fillet feature, one constant-radius edge set per group: groups = [(edges, radius), ...].
+
+    radius: mm expression or Ex, per group. tangent_chain applies to every group (default False = picked edges only).
+    One feature instead of several fillet() calls on one body (feature_quality rule finishing_split).
+    """
+    if not groups or any(not edges for edges, _ in groups):
+        raise ValueError("fillet_groups: needs >= 1 group, every group with >= 1 edge")
+    check_label(label)
+    fi = comp.features.filletFeatures.createInput()
+    for edges, radius in groups:
+        fi.edgeSetInputs.addConstantRadiusEdgeSet(collection(edges), _vi(radius), tangent_chain)
+    feat = comp.features.filletFeatures.add(fi)
+    set_label(feat, label)
+    return feat
+
+
+def chamfer_groups(
+    comp: adsk.fusion.Component,
+    groups: list[tuple[list[adsk.fusion.BRepEdge], str | Ex]],
+    *,
+    label: str,
+) -> adsk.fusion.ChamferFeature:
+    """One chamfer feature, one equal-distance edge set per group: groups = [(edges, distance), ...].
+
+    distance: mm expression or Ex, per group. Tangent chain off (picked edges only), as chamfer() default.
+    One feature instead of several chamfer() calls on one body (feature_quality rule finishing_split).
+    """
+    if not groups or any(not edges for edges, _ in groups):
+        raise ValueError("chamfer_groups: needs >= 1 group, every group with >= 1 edge")
+    check_label(label)
+    ci = comp.features.chamferFeatures.createInput2()
+    for edges, distance in groups:
+        ci.chamferEdgeSets.addEqualDistanceChamferEdgeSet(collection(edges), _vi(distance), False)
+    feat = comp.features.chamferFeatures.add(ci)
+    set_label(feat, label)
+    return feat
+
+
 def _split_probe[EdgeT](
     edges: Sequence[EdgeT],
     min_len: float,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-from fusion_kit._vec import _dot, _norm, _scale, _sub, _unit
+from fusion_kit._vec import _cross, _dot, _norm, _scale, _sub, _unit
 from fusion_kit.dfam_limits import AXIS_PARALLEL, BED_ON_TOL_MM, FULL_CYLINDER_DEG, TOP_EDGE_PARALLEL
 from fusion_kit.dfam_rules import bed_footprint_mm
 from fusion_kit.dfam_types import DFAM_GROUP, Vec
@@ -214,17 +214,21 @@ def _cone_width_mm(face: adsk.fusion.BRepFace, edge: adsk.fusion.BRepEdge) -> fl
     """Slant width of a conical chamfer strip, mm = area / mean(L_bed, L_top).
 
     L_bed = summed length of the face's edges at the bed edge's z (a split bed circle = several arcs).
-    L_top = summed length of the face's edges wholly above it (wall-side arc). None if no top edge.
+    L_top = summed length of the face's edges lying at the face's max z (wall-side boundary only).
+    Side, slant and mid-height edges are excluded. None if no top edge.
     """
     tol = BED_ON_TOL_MM / 10  # cm
     ref = edge.pointOnEdge.z
+    top_z = max(x.boundingBox.maxPoint.z for x in face.edges)
+    if top_z - ref <= tol:
+        return None
     l_bed = 0.0
     l_top = 0.0
     for x in face.edges:
         lo, hi = x.boundingBox.minPoint.z, x.boundingBox.maxPoint.z
         if hi - lo <= tol and abs(lo - ref) <= tol:
             l_bed += x.length
-        elif lo > ref + tol:
+        elif lo >= top_z - tol:
             l_top += x.length
     if l_top == 0.0:
         return None
@@ -266,7 +270,37 @@ def _tagged(face: adsk.fusion.BRepFace, name: str, tags: dict[str, frozenset[int
     return face.tempId in tags.get(name, frozenset())
 
 
-def _span_deg(face: adsk.fusion.BRepFace) -> float:
-    """Angular span of a cylinder face, deg, from u-range of evaluator.parametricRange() (rad). UNMEASURED live."""
-    rng = face.evaluator.parametricRange()
-    return math.degrees(rng.maxPoint.x - rng.minPoint.x)
+SPAN_SAMPLES = 36  # 10 deg steps around the axis
+
+
+def _perp_basis(axis: Vec) -> tuple[Vec, Vec]:
+    """Two unit vectors orthogonal to unit axis."""
+    helper = (1.0, 0.0, 0.0) if abs(axis[0]) < AXIS_PARALLEL else (0.0, 1.0, 0.0)
+    u = _unit(_cross(axis, helper))
+    return u, _cross(axis, u)
+
+
+def _span_deg(face: adsk.fusion.BRepFace, axis: Vec, origin: Vec, radius_mm: float) -> float:
+    """Trimmed angular span (deg) of a cylinder face about axis; origin and radius_mm in mm.
+
+    evaluator.parametricRange() is the UNTRIMMED surface domain (u 0..2pi for any cylinder): using it as the span made
+    a 90 deg fillet a full hole. Sample the circle at face-bbox mid-height on the untrimmed surface; a sample counts when
+    getParameterAtPoint succeeds and isParameterOnFace (trim test, as printability._project_on_face). 10 deg resolution.
+    Live behaviour not measured.
+    """
+    import adsk.core
+
+    lo, hi = _box_mm(face.boundingBox)
+    mid = ((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2)
+    t = _dot(_sub(mid, origin), axis)
+    centre = (origin[0] + axis[0] * t, origin[1] + axis[1] * t, origin[2] + axis[2] * t)
+    u, v = _perp_basis(axis)
+    hits = 0
+    for i in range(SPAN_SAMPLES):
+        a = 2 * math.pi * i / SPAN_SAMPLES
+        ca, sa = math.cos(a), math.sin(a)
+        q = [(centre[k] + radius_mm * (ca * u[k] + sa * v[k])) / 10 for k in range(3)]  # mm -> cm (Fusion API)
+        ok, param = face.evaluator.getParameterAtPoint(adsk.core.Point3D.create(q[0], q[1], q[2]))
+        if ok and face.evaluator.isParameterOnFace(param):
+            hits += 1
+    return 360.0 * hits / SPAN_SAMPLES

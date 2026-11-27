@@ -129,49 +129,92 @@ def _relief_body() -> Any:
     )
 
 
-@pytest.mark.parametrize(
-    ("along", "bed_dir"),
-    [("x", "-z"), ("y", "-z"), ("z", "-x")],
-)
-def test_relief_family_pattern_uses_origin_axis_positive_step(
-    monkeypatch: pytest.MonkeyPatch, along: Literal["x", "y", "z"], bed_dir: BedDir
-) -> None:
-    # Origin axes point +, so the step is always +spacing. No construction axis or plane is added for the direction.
-    comp = MagicMock(name="comp")
-    through = MagicMock(name="axis_through")
-    for axis_fn in ("axis_x_through", "axis_y_through", "axis_z_through"):
-        monkeypatch.setattr(features_axes, axis_fn, through)
-    monkeypatch.setattr(features_warp, "new_sketch", lambda comp, plane, *, label: SimpleNamespace(label=label))
-    monkeypatch.setattr(features_warp, "_seed_rect", lambda sk, *corners, **kw: None)
-    monkeypatch.setattr(features_warp, "profile", lambda sk: "prof")
-    monkeypatch.setattr(features_warp, "extrude", lambda comp, prof, distance, **kwargs: "seed")
-    pat = MagicMock(name="pattern_rectangular", return_value="pat")
-    monkeypatch.setattr(features_warp, "pattern_rectangular", pat)
-    # 100 mm cube (cm bbox) -> centres -30, 0, 30 mm on every axis; z needs z bounds, hence not _relief_body()
-    body: Any = SimpleNamespace(
+def _cube3() -> Any:
+    # cm: 100 mm cube -> both in-plane spans 100 mm (bed -z) -> centres -30, 0, 30 mm about 50 mm
+    return SimpleNamespace(
         boundingBox=SimpleNamespace(
             minPoint=SimpleNamespace(x=0.0, y=0.0, z=0.0),
             maxPoint=SimpleNamespace(x=10.0, y=10.0, z=10.0),
         )
     )
 
-    out = features._relief_family(
-        comp,
-        MagicMock(name="bed"),
-        body,
-        along,
-        label="t",
-        width_mm=0.8,
-        depth_mm=0.3,
-        pitch_mm=30.0,
-        bed_dir=bed_dir,
+
+def _patch_bed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # bed plane normal +Z, bed -z -> depth_sign +1
+    plane = SimpleNamespace(geometry=SimpleNamespace(normal=SimpleNamespace(x=0.0, y=0.0, z=1.0)))
+    monkeypatch.setattr(features_warp, "axis_plane", lambda comp, axis, expr, value_mm, label: plane)
+    monkeypatch.setattr(features_warp, "set_bed", lambda body, bed: None)
+
+
+def _fake_fusion(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """Fake sketch / seed rect / extrude / pattern. rec.sketches = labels, rec.rects = [(args, kwargs)] per
+    _seed_rect call, rec.extrudes = [(prof, distance, kwargs)], rec.pattern = pattern_rectangular mock."""
+    rec = SimpleNamespace(
+        sketches=[], rects=[], extrudes=[], pattern=MagicMock(name="pattern_rectangular", return_value="pat")
     )
 
-    args = pat.call_args.args
-    assert args[2] is getattr(comp, f"{along}ConstructionAxis")
-    assert args[3] == "3"
-    assert args[4] == "30.000000 mm"
-    assert out == ["seed", "pat"]
+    def fake_sketch(comp: Any, plane: Any, *, label: str) -> SimpleNamespace:
+        rec.sketches.append(label)
+        return SimpleNamespace(label=label)
+
+    def fake_extrude(comp: Any, prof: Any, distance: str, **kwargs: Any) -> str:
+        rec.extrudes.append((prof, distance, kwargs))
+        return f"feat:{kwargs['label']}"
+
+    monkeypatch.setattr(features_warp, "new_sketch", fake_sketch)
+    monkeypatch.setattr(features_warp, "_seed_rect", lambda sk, *c, **kw: rec.rects.append((c, kw)))
+    monkeypatch.setattr(features_warp, "profile", lambda sk: "prof")
+    monkeypatch.setattr(features_warp, "profiles", lambda sk: ["p1", "p2"])
+    monkeypatch.setattr(features_warp, "extrude", fake_extrude)
+    monkeypatch.setattr(features_warp, "pattern_rectangular", rec.pattern)
+    return rec
+
+
+def _literal_calls(
+    monkeypatch: pytest.MonkeyPatch, along: Literal["x", "y"], **kw: Any
+) -> list[tuple[tuple[Any, ...], dict[str, Any]]]:
+    """_literal_grooves on the 100 mm body (_relief_body), bed -z: (seed rect args, kwargs) per groove rect."""
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    monkeypatch.setattr(features_warp, "_seed_rect", lambda sk, *c, **k: calls.append((c, k)))
+    features_warp._literal_grooves(
+        MagicMock(name="sketch"),
+        _relief_body(),
+        along,
+        width_mm=0.8,
+        pitch_mm=30.0,
+        bed_dir="-z",
+        bed_mm=0.0,
+        width_expr=kw.get("width_expr"),
+        run_expr=kw.get("run_expr"),
+    )
+    return calls
+
+
+def _literal_corners(monkeypatch: pytest.MonkeyPatch, along: Literal["x", "y"]) -> list[tuple[Any, ...]]:
+    return [c for c, _ in _literal_calls(monkeypatch, along)]
+
+
+def test_literal_families_each_own_sketch_and_cut(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Live bug: both literal families in ONE sketch -> crossing rects enclose cells and profiles() returns them too
+    # (housing_warp_sketch: 33 profiles, 3 x 852.64 mm2 = 29.2 mm cells) -> whole bed face recessed 0.6 mm, overhang.
+    # Parallel strips of one family enclose nothing: one sketch + one cut per literal family, no pattern.
+    rec = _fake_fusion(monkeypatch)
+    _patch_bed(monkeypatch)
+    rect_sketch: list[str] = []
+    monkeypatch.setattr(features_warp, "_seed_rect", lambda sk, *c, **k: rect_sketch.append(sk.label))
+    comp = MagicMock(name="comp")
+    through = MagicMock(name="axis_through")
+    for axis_fn in ("axis_x_through", "axis_y_through", "axis_z_through"):
+        monkeypatch.setattr(features_axes, axis_fn, through)
+    out = features.warp_relief_grooves(comp, _cube3(), label="warp_t", width_mm=0.8, depth_mm=0.3, pitch_mm=30.0)
+    assert rec.sketches == ["warp_t_x_sketch", "warp_t_y_sketch"]
+    assert rect_sketch == ["warp_t_x_sketch"] * 3 + ["warp_t_y_sketch"] * 3
+    assert [kw["label"] for _, _, kw in rec.extrudes] == ["warp_t_x", "warp_t_y"]
+    assert all(kw["op"] == "cut" for _, _, kw in rec.extrudes)
+    assert all(prof == ["p1", "p2"] for prof, _, _ in rec.extrudes)
+    assert all(distance == "0.300000 mm" for _, distance, _ in rec.extrudes)
+    assert out == ["feat:warp_t_x", "feat:warp_t_y"]
+    rec.pattern.assert_not_called()
     through.assert_not_called()
     comp.constructionAxes.add.assert_not_called()
     comp.constructionPlanes.add.assert_not_called()
@@ -201,6 +244,7 @@ def _run_family(
         width_mm=0.8,
         depth_mm=0.3,
         pitch_mm=30.0,
+        **_LIVE_KW,
     )
     return pat
 
@@ -232,12 +276,8 @@ def test_seed_rect_dims_both_corners_to_origin(monkeypatch: pytest.MonkeyPatch) 
 
 def test_x_and_y_seed_centres_equal_expected_coordinate(monkeypatch: pytest.MonkeyPatch) -> None:
     # 100 mm span, pitch 30 -> centres -30/0/30 about body centre 50 -> first groove centre 20 mm for BOTH families.
-    corners_x: list[tuple[Any, ...]] = []
-    corners_y: list[tuple[Any, ...]] = []
-    _run_family(monkeypatch, "x", corners_x)
-    _run_family(monkeypatch, "y", corners_y)
-    cx = corners_x[0]  # _seed_rect(s, x0, y0, x1, y1), mm floats
-    cy = corners_y[0]
+    cx = _literal_corners(monkeypatch, "x")[0]  # _seed_rect(s, x0, y0, x1, y1), mm floats
+    cy = _literal_corners(monkeypatch, "y")[0]
     centre_x = (cx[0] + cx[2]) / 2  # X family spaces along x
     centre_y = (cy[1] + cy[3]) / 2  # Y family spaces along y
     assert centre_x == pytest.approx(20.0)
@@ -294,26 +334,26 @@ def _family_capture(
     return seen
 
 
-def test_expr_strings_reach_seed_width_depth_and_pattern(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_literal_width_expr_reaches_seed_rect(monkeypatch: pytest.MonkeyPatch) -> None:
     # 100 mm span, centres -30/0/30 about 50 mm -> first groove centre 20 mm; width dims = centre -/+ (width)/2
-    seen = _family_capture(
-        monkeypatch,
-        "x",
-        1.0,
-        width_expr="warp_groove_width",
-        depth_expr="warp_groove_depth",
-    )
-    assert seen["rect"] == {0: ("20.000000 mm - (warp_groove_width) / 2", "20.000000 mm + (warp_groove_width) / 2")}
-    assert seen["depth"] == "(warp_groove_depth)"
-    assert seen["pattern_distance"] == "30.000000 mm"  # pitch stays literal
-    assert seen["pattern_qty"] == "3"  # qty stays literal
+    calls = _literal_calls(monkeypatch, "x", width_expr="warp_groove_width")
+    assert len(calls) == 3
+    assert calls[0][1]["exprs"] == {
+        0: ("20.000000 mm - (warp_groove_width) / 2", "20.000000 mm + (warp_groove_width) / 2")
+    }
 
 
-def test_no_expr_args_keep_literals(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen = _family_capture(monkeypatch, "x", 1.0)
-    assert seen["rect"] is None
-    assert seen["depth"] == "0.300000 mm"
-    assert seen["pattern_distance"] == "30.000000 mm"
+def test_literal_no_expr_args_keep_literals(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _literal_calls(monkeypatch, "x")
+    assert len(calls) == 3
+    assert all(kw["exprs"] is None for _, kw in calls)
+
+
+def test_depth_text_expr_or_literal_signed() -> None:
+    assert features_warp._depth_text(1, 0.3, "warp_groove_depth") == "(warp_groove_depth)"
+    assert features_warp._depth_text(-1, 0.3, "warp_groove_depth") == "-(warp_groove_depth)"
+    assert features_warp._depth_text(1, 0.3, None) == "0.300000 mm"
+    assert features_warp._depth_text(-1, 0.3, None) == "-0.300000 mm"
 
 
 def test_seed_rect_exprs_replace_axis_corner_dims(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -327,26 +367,12 @@ def test_seed_rect_exprs_replace_axis_corner_dims(monkeypatch: pytest.MonkeyPatc
     assert far.args[2] == ("HI", "21.000000 mm", "0.000000 mm")
 
 
-def test_warp_relief_grooves_passes_expr_strings_to_both_families(monkeypatch: pytest.MonkeyPatch) -> None:
-    body: Any = SimpleNamespace(
-        boundingBox=SimpleNamespace(
-            minPoint=SimpleNamespace(x=0.0, y=0.0, z=0.0),
-            maxPoint=SimpleNamespace(x=10.0, y=10.0, z=1.0),
-        )
-    )
-    plane = SimpleNamespace(geometry=SimpleNamespace(normal=SimpleNamespace(x=0.0, y=0.0, z=1.0)))
-    monkeypatch.setattr(features_warp, "axis_plane", lambda comp, axis, expr, value_mm, label: plane)
-    monkeypatch.setattr(features_warp, "set_bed", lambda body, bed: None)
-    calls: list[tuple[str, dict[str, Any]]] = []
-
-    def fake_family(comp: Any, bed_plane: Any, b: Any, along: str, **kwargs: Any) -> list[str]:
-        calls.append((along, kwargs))
-        return ["f"]
-
-    monkeypatch.setattr(features_warp, "_relief_family", fake_family)
+def test_warp_relief_grooves_passes_expr_strings_to_literal_families(monkeypatch: pytest.MonkeyPatch) -> None:
+    rec = _fake_fusion(monkeypatch)
+    _patch_bed(monkeypatch)
     out = features.warp_relief_grooves(
         MagicMock(name="comp"),
-        body,
+        _cube3(),
         label="warp_t",
         width_mm=0.8,
         depth_mm=0.3,
@@ -354,11 +380,11 @@ def test_warp_relief_grooves_passes_expr_strings_to_both_families(monkeypatch: p
         width_expr="warp_groove_width",
         depth_expr="warp_groove_depth",
     )
-    assert [along for along, _ in calls] == ["x", "y"]
-    for _, kw in calls:
-        assert kw["width_expr"] == "warp_groove_width"
-        assert kw["depth_expr"] == "warp_groove_depth"
-    assert out == ["f", "f"]
+    assert len(rec.rects) == 6
+    assert all(len(kw["exprs"]) == 1 for _, kw in rec.rects)  # width dims only, no run_expr in literal mode
+    assert sorted({next(iter(kw["exprs"])) for _, kw in rec.rects}) == [0, 1]  # x family -> axis 0, y -> axis 1
+    assert rec.extrudes[0][1] == "(warp_groove_depth)"
+    assert out == ["feat:warp_t_x", "feat:warp_t_y"]
 
 
 # ---------------------------------------------------------------------------
@@ -389,29 +415,21 @@ def test_seed_corners_are_centre_pm_half_width_in_model_coords(
     fix = MagicMock(name="fix_point")
     monkeypatch.setattr(features_warp, "rect", lambda s, a, b: [MagicMock(name=f"l{k}") for k in range(4)])
     monkeypatch.setattr(features_warp, "fix_point", fix)
-    monkeypatch.setattr(features_warp, "new_sketch", lambda comp, plane, *, label: SimpleNamespace(label=label))
-    monkeypatch.setattr(features_warp, "profile", lambda sk: "prof")
-    monkeypatch.setattr(features_warp, "extrude", lambda comp, prof, distance, **kwargs: "seed")
-    monkeypatch.setattr(features_warp, "pattern_rectangular", MagicMock(name="pattern_rectangular", return_value="pat"))
-    axis = SimpleNamespace(geometry=SimpleNamespace(direction=SimpleNamespace(x=1.0, y=1.0, z=1.0)))
-    for axis_fn in ("axis_x_through", "axis_y_through", "axis_z_through"):
-        monkeypatch.setattr(features_axes, axis_fn, lambda comp, **kwargs: axis)
     a, sgn = features.bed_axis(bed)
     bed_mm = 40.0 if sgn > 0 else 0.0  # cube: bed plane is the max or min face on the bed axis
-    features._relief_family(
-        MagicMock(name="comp"),
-        MagicMock(name="bed_plane"),
+    features_warp._literal_grooves(
+        MagicMock(name="sketch"),
         _cube_body(),
         along,
-        label="t",
         width_mm=0.8,
-        depth_mm=0.3,
         pitch_mm=30.0,
         bed_dir=bed,
         bed_mm=bed_mm,
         width_expr="warp_groove_width",
+        run_expr=None,
     )
-    lo, hi = (c.args[2] for c in fix.call_args_list)  # seed rect corners a (bottom) and b (top), model (x, y, z)
+    # first groove rect (centre 5 mm): corners a (bottom) and b (top), model (x, y, z)
+    lo, hi = (c.args[2] for c in fix.call_args_list[:2])
     i = "xyz".index(along)  # spacing / width axis
     j = 3 - a - i  # run axis
     assert lo[a] == hi[a] == f"{bed_mm:.6f} mm"  # on the bed plane
@@ -552,16 +570,20 @@ def test_warp_relief_grooves_routes_length_expr_per_family(monkeypatch: pytest.M
             maxPoint=SimpleNamespace(x=10.0, y=10.0, z=1.0),
         )
     )
-    plane = SimpleNamespace(geometry=SimpleNamespace(normal=SimpleNamespace(x=0.0, y=0.0, z=1.0)))
-    monkeypatch.setattr(features_warp, "axis_plane", lambda comp, axis, expr, value_mm, label: plane)
-    monkeypatch.setattr(features_warp, "set_bed", lambda body, bed: None)
-    calls: list[tuple[str, dict[str, Any]]] = []
+    _patch_bed(monkeypatch)
+    rec = _fake_fusion(monkeypatch)
+    live_calls: list[tuple[str, dict[str, Any]]] = []
+    lit_calls: list[tuple[str, dict[str, Any]]] = []
 
     def fake_family(comp: Any, bed_plane: Any, b: Any, along: str, **kwargs: Any) -> list[str]:
-        calls.append((along, kwargs))
+        live_calls.append((along, kwargs))
         return ["f"]
 
+    def fake_literal(s: Any, b: Any, along: str, **kwargs: Any) -> None:
+        lit_calls.append((along, kwargs))
+
     monkeypatch.setattr(features_warp, "_relief_family", fake_family)
+    monkeypatch.setattr(features_warp, "_literal_grooves", fake_literal)
     out = features.warp_relief_grooves(
         MagicMock(name="comp"),
         body,
@@ -575,11 +597,14 @@ def test_warp_relief_grooves_routes_length_expr_per_family(monkeypatch: pytest.M
         margin_expr="warp_groove_margin",
         target_pitch_expr="warp_groove_target_pitch",
     )
-    assert {along: kw["length_expr"] for along, kw in calls} == {"x": "top_flange_width", "y": None}
-    assert {along: kw["run_expr"] for along, kw in calls} == {"x": ("body_y_min", "body_y_max"), "y": None}
-    assert all(kw["margin_expr"] == "warp_groove_margin" for _, kw in calls)
-    assert all(kw["target_pitch_expr"] == "warp_groove_target_pitch" for _, kw in calls)
-    assert out == ["f", "f"]
+    assert {along: kw["length_expr"] for along, kw in live_calls} == {"x": "top_flange_width"}
+    assert {along: kw["run_expr"] for along, kw in live_calls} == {"x": ("body_y_min", "body_y_max")}
+    assert all(kw["margin_expr"] == "warp_groove_margin" for _, kw in live_calls)
+    assert all(kw["target_pitch_expr"] == "warp_groove_target_pitch" for _, kw in live_calls)
+    assert [along for along, _ in lit_calls] == ["y"]  # literal family joins the one sketch
+    assert lit_calls[0][1]["run_expr"] is None  # run axis x is live-family-free here
+    assert rec.sketches == ["warp_t_y_sketch"]
+    assert out == ["f", "feat:warp_t_y"]
 
 
 def test_live_seed_centre_starts_from_run_low_edge_when_both_families_live(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -706,6 +731,7 @@ def test_expr_only_resolves_float_twins_from_params(monkeypatch: pytest.MonkeyPa
         return ["f"]
 
     monkeypatch.setattr(features_warp, "_relief_family", fake_family)
+    _fake_fusion(monkeypatch)  # literal family y: its rects + cut go through the fakes
     features.warp_relief_grooves(
         MagicMock(name="comp"),
         _two_axis_body(),

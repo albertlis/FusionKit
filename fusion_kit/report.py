@@ -40,7 +40,8 @@ def report(comp: adsk.fusion.Component, dfam: bool = True) -> str:
     suppressed=N: timeline features with isSuppressed (intentional, e.g. disabled holes) -> counted there, NOT as unhealthy.
 
     Prints `design_timeline_unhealthy=N ... timeline_numbered=N suppressed=N`; `suppressed` =
-    timeline features with `isSuppressed` (excluded from unhealthy)
+    timeline features with `isSuppressed` (excluded from unhealthy). Walks the design timeline once per call;
+    for many comps use report_data(comp, stats=design_stats(design)).
     """
     text = format_report(report_data(comp, dfam))
     print(text)
@@ -66,12 +67,49 @@ class ReportData:
     skq: list[str] = field(default_factory=list)  # SKQ_FAIL / SKQ_WARN lines over this comp's sketches
 
 
-def report_data(comp: adsk.fusion.Component, dfam: bool = True) -> ReportData:
+@dataclass(frozen=True)
+class DesignStats:
+    """Design-wide facts (timeline health, labels). One walk of the timeline per design; share across comps."""
+
+    unhealthy: int
+    suppressed: int
+    unnamed: int
+    numbered: int
+
+
+def design_stats(design: adsk.fusion.Design) -> DesignStats:
+    """Timeline health + timeline label stats for the whole design. Compute ONCE per build, pass to report_data(stats=).
+
+    Groups skipped (no health state); isSuppressed features counted as suppressed, not unhealthy.
+    """
+    timeline = design.timeline
+    items = [timeline.item(i) for i in range(timeline.count)]
+    features = [item for item in items if not item.isGroup]
+    suppressed = sum(1 for item in features if item.isSuppressed)
+    unhealthy = sum(
+        1
+        for item in features
+        if not item.isSuppressed and item.healthState != adsk.fusion.FeatureHealthStates.HealthyFeatureHealthState
+    )
+    unnamed, numbered = label_stats(design)
+    return DesignStats(unhealthy=unhealthy, suppressed=suppressed, unnamed=unnamed, numbered=numbered)
+
+
+def report_data(
+    comp: adsk.fusion.Component,
+    dfam: bool = True,
+    *,
+    stats: DesignStats | None = None,
+    skq: bool = True,
+) -> ReportData:
     """Measurements behind report(), as data. Prints nothing. Field meaning: see report().
 
+    stats: precomputed design_stats(design); None = computed here (one timeline walk per call).
+    skq=False: per-comp check_sketches skipped (ReportData.skq = []); build_check runs the gated SKQ itself.
     -> ReportData (structured facts, prints nothing; findings None when dfam=False)
     """
-    design = active_design()
+    if stats is None:
+        stats = design_stats(active_design())
 
     bodies = comp.bRepBodies.count
     lumps = sum(b.lumps.count for b in comp.bRepBodies)
@@ -87,18 +125,6 @@ def report_data(comp: adsk.fusion.Component, dfam: bool = True) -> ReportData:
     sk_total = sketches.count
     sk_constrained = sum(1 for i in range(sk_total) if sketches.item(i).isFullyConstrained)
 
-    # Groups skipped: UnknownFeatureHealthState, not a fault. Suppressed features skipped: intentional, not a fault.
-    timeline = design.timeline
-    items = [timeline.item(i) for i in range(timeline.count)]
-    features = [item for item in items if not item.isGroup]
-    suppressed = sum(1 for item in features if item.isSuppressed)
-    unhealthy = sum(
-        1
-        for item in features
-        if not item.isSuppressed and item.healthState != adsk.fusion.FeatureHealthStates.HealthyFeatureHealthState
-    )
-
-    unnamed, numbered = label_stats(design)
     findings = [f for b in comp.bRepBodies for f in dfam_check(b)] if dfam else None
     return ReportData(
         name=comp.name,
@@ -108,12 +134,12 @@ def report_data(comp: adsk.fusion.Component, dfam: bool = True) -> ReportData:
         vol_cm3=vol,
         sketches_constrained=sk_constrained,
         sketches_total=sk_total,
-        unhealthy=unhealthy,
-        unnamed=unnamed,
-        numbered=numbered,
+        unhealthy=stats.unhealthy,
+        unnamed=stats.unnamed,
+        numbered=stats.numbered,
         findings=findings,
-        suppressed=suppressed,
-        skq=sketch_quality.check_sketches(sketches),
+        suppressed=stats.suppressed,
+        skq=sketch_quality.check_sketches(sketches) if skq else [],
     )
 
 

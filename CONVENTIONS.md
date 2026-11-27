@@ -5,7 +5,7 @@
 - `tests/` — offline pytest (`test_*`), no Fusion needed. `tests/smoke/` — live scripts run inside Fusion.
 - `hooks/` — Claude Code hook scripts + `hooks.json` wiring.
 - `skills/<skill-name>/SKILL.md`, `agents/<AgentName>.md` — plugin content.
-- `docs/` — `fusion_kit_api.md` (helper index), `gotchas.md`, `dfam_guidelines.md`.
+- `docs/` — `fusion_kit_api.md` (helper index), `api/<module>.md` (per-module helper cards), `gotchas.md`, `dfam_guidelines.md`.
 - `.claude-plugin/`, `.github/` — packaging and issue templates only.
 
 ## Naming
@@ -30,14 +30,16 @@
 - finding — one DfAM result — issue, violation
 - skip — DfAM opt-out rule map — ignore, exclude, waiver
 - gap — missing fusion_kit op — todo, missing
-- Allowed abbreviations: comp, occ, expr, param, mm, deg, dfam, bbox.
+- graph — build graph, one `GraphNode` per timeline item (`graph.py`) — tree, dag, map
+- skq — sketch_quality finding line prefix (`SKQ_WARN`) — sq, sketchq
+- Allowed abbreviations: comp, occ, expr, param, mm, deg, dfam, bbox, skq.
 
 ## Banned names
 `utils`, `utils2`, `helper(s)` (in library), `misc`, `common`, `core`, `base`, `old_*`, `tmp_*`, `final*`, `*_v2`, `legacy`; bare `data`/`info`/`manager`/`handler`/`process`; unit-less length params (`width` → `width_mm`).
 
 ## Where new code goes
 - New op used by >=2 mechanisms → existing domain module; new module only for a new domain.
-- New public helper → also a row in `docs/fusion_kit_api.md` + offline test.
+- New public helper → also a row in `docs/api/<module>.md` + offline test.
 - New Fusion quirk → `docs/gotchas.md`. New print rule → `docs/dfam_guidelines.md` + `dfam.py`.
 - Shared vector math → `fusion_kit/_vec.py` (not copied per module).
 - New hook → `hooks/` + entry in `hooks.json`.

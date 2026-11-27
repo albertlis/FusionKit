@@ -10,8 +10,8 @@ Guidance for Claude Code working ON the FusionKit repository. To build Fusion mo
 
 ## Repo map
 
-- `fusion_kit/`: helper modules. Module index in `fusion_kit/__init__.py`: component, dfam, enums, expr, features, holes, joints, loader, printability, report, sketch, steps, timeline, user_params, view.
-- `docs/fusion_kit_api.md`: helper index (one row per public def). Format enforced by `tests/test_api_index_offline.py`.
+- `fusion_kit/`: helper modules. Module index in `fusion_kit/__init__.py`: component, dfam, enums, expr, features, graph, holes, joints, loader, printability, report, sketch, steps, timeline, user_params, view.
+- `docs/fusion_kit_api.md`: helper index (one bullet per module). `docs/api/<module>.md`: one card per module, one row per public def. Format enforced by `tests/test_api_index_offline.py`.
 - `docs/gotchas.md`: verified Fusion behaviour. Each entry carries a "measured" note.
 - `docs/dfam_guidelines.md`: FDM/PETG DfAM rules used by the `dfam` module and `hooks/dfam_guard.py`.
 - `tests/`: offline tests. `tests/conftest.py` installs `MagicMock` stubs for `adsk.core` and `adsk.fusion` when `adsk` is not importable.
@@ -47,7 +47,7 @@ CI runs `ruff check`, `pytest` and the four hook selftests (`cad_simplify_nudge`
 ## Rules for changes
 
 - Public helpers take mm. Fusion internals are cm (`.value` and `evaluateExpression` return cm). Convert at the boundary.
-- Every new or changed public helper: row in `docs/fusion_kit_api.md`, an offline test that can fail, and a live smoke test in `tests/smoke/` when it touches geometry.
+- Every new or changed public helper: row in `docs/api/<module>.md`, an offline test that can fail, and a live smoke test in `tests/smoke/` when it touches geometry.
 - `label=` is mandatory on timeline items created by builders: snake_case role, sketches end in `_sketch`. Raw entities get `timeline.set_label`.
 - No try/except that swallows errors in helpers. An exception is the debug output.
 - Verified Fusion behaviour goes to `docs/gotchas.md` with a "measured" note. Unverified behaviour does not go there.

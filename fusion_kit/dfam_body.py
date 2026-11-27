@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from fusion_kit.dfam_bed import bed_from_body, print_frame_with_tags
+from fusion_kit.dfam_bed import bed_from_body, print_frame_loop_centres, print_frame_with_tags
 from fusion_kit.dfam_facts import _grip_fin_section, facts_from_body
 from fusion_kit.dfam_rules import check_all
 from fusion_kit.dfam_types import DFAM_GROUP, SKIP_ATTR, Finding
@@ -103,7 +103,7 @@ def dfam_check(body: adsk.fusion.BRepBody, fail_as_warn: bool = False) -> list[F
     """
     bed = bed_from_body(body)
     frame, tags, unmapped = print_frame_with_tags(body)
-    body_fact, holes, edges = facts_from_body(frame, tags)
+    body_fact, holes, edges = facts_from_body(frame, tags, bed_loop_centres=print_frame_loop_centres(body, bed))
     section = _grip_fin_section(body)  # attr lives on the ORIGINAL body, not the print-frame copy
     if section is not None:
         body_fact = replace(body_fact, grip_fin_section_mm=section)

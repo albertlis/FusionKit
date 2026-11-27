@@ -32,6 +32,20 @@ def _v(x: float, y: float, z: float) -> SimpleNamespace:
     return SimpleNamespace(x=x, y=y, z=z)
 
 
+def _arc_face(start: float, span: float) -> SimpleNamespace:
+    """Cylinder evaluator, axis through (1,1) cm. parametricRange = untrimmed u 0..2pi (as Fusion reports);
+    trimmed face = arc [start, start+span] rad, answered by isParameterOnFace (getParameterAtPoint = identity)."""
+
+    def on_face(p: SimpleNamespace) -> bool:
+        return (math.atan2(p.y - 1.0, p.x - 1.0) - start) % (2 * math.pi) <= span
+
+    return SimpleNamespace(
+        parametricRange=lambda: SimpleNamespace(minPoint=_v(0, 0, 0), maxPoint=_v(2 * math.pi, 0, 0)),
+        getParameterAtPoint=lambda p: (True, p),
+        isParameterOnFace=on_face,
+    )
+
+
 @pytest.fixture
 def casts() -> Iterator[None]:
     for cls, tag in (("Plane", "plane"), ("Cylinder", "cyl"), ("Cone", "cone"), ("Line3D", "line"), ("Torus", "torus")):
@@ -42,7 +56,7 @@ def casts() -> Iterator[None]:
 
 
 @pytest.fixture
-def geom_features(monkeypatch: pytest.MonkeyPatch) -> None:
+def geom_features(monkeypatch: pytest.MonkeyPatch, point3d_xyz: None) -> None:
     monkeypatch.setattr(features, "face_normal", lambda face, point=None: face.normal)
     monkeypatch.setattr(
         features,
@@ -125,15 +139,15 @@ def _hole_body(halves: int) -> MagicMock:
     bed = _face("bed", (0, 0, -1), (0, 0, 0), (2, 2, 0))
     top = _face("top", (0, 0, 1), (0, 0, 1), (2, 2, 1))
     points = [0.8] if halves == 1 else [1.2, 0.8]
-    u_max = math.radians(360.0 / halves)
+    arcs = (
+        [(0.0, 2 * math.pi)] if halves == 1 else [(-math.pi / 2, math.pi), (math.pi / 2, math.pi)]
+    )  # i=0 right, i=1 left
     cyls = []
     for i, px in enumerate(points):
         cyl = _face(f"cyl{i}", ((1.0 - px) / 0.2, 0, 0), (0.8, 0.8, 0), (1.2, 1.2, 1), tag="cyl")
         cyl.pointOnFace = _v(px, 1, 0.5)
         cyl.geometry = SimpleNamespace(tag="cyl", axis=_v(0, 0, 1), origin=_v(1, 1, 0), radius=0.2)
-        cyl.evaluator = SimpleNamespace(
-            parametricRange=lambda u=u_max: SimpleNamespace(minPoint=_v(0, 0, 0), maxPoint=_v(u, 0, 0))
-        )
+        cyl.evaluator = _arc_face(*arcs[i])
         _edge(f"ct{i}", cyl, top, (0.8, 1, 1), (1.2, 1, 1))
         _edge(f"cb{i}", cyl, bed, (0.8, 1, 0), (1.2, 1, 0))
         cyls.append(cyl)
@@ -148,16 +162,15 @@ def _loop(lo: tuple[float, float, float], hi: tuple[float, float, float], *, out
     return SimpleNamespace(isOuter=outer, edges=[edge])
 
 
-def _vhole(walls: list[SimpleNamespace]) -> MagicMock:
-    """2 x 2 x 1 cm block, vertical hole r=0.2 cm at (1,1): one 360 deg cylinder meeting bed, top and walls."""
+def _vhole(walls: list[SimpleNamespace], arc: tuple[float, float] = (0.0, 2 * math.pi)) -> MagicMock:
+    """2 x 2 x 1 cm block, vertical hole r=0.2 cm at (1,1): one cylinder (arc = start, span rad; default 360 deg)
+    meeting bed, top and walls."""
     bed = _face("bed", (0, 0, -1), (0, 0, 0), (2, 2, 0))
     top = _face("top", (0, 0, 1), (0, 0, 1), (2, 2, 1))
     cyl = _face("cyl0", (1.0, 0, 0), (0.8, 0.8, 0), (1.2, 1.2, 1), tag="cyl")
     cyl.pointOnFace = _v(0.8, 1, 0.5)
     cyl.geometry = SimpleNamespace(tag="cyl", axis=_v(0, 0, 1), origin=_v(1, 1, 0), radius=0.2)
-    cyl.evaluator = SimpleNamespace(
-        parametricRange=lambda: SimpleNamespace(minPoint=_v(0, 0, 0), maxPoint=_v(2 * math.pi, 0, 0))
-    )
+    cyl.evaluator = _arc_face(*arc)
     _edge("cb", cyl, bed, (0.8, 1, 0), (1.2, 1, 0))
     _edge("ct", cyl, top, (0.8, 1, 1), (1.2, 1, 1))
     for w in walls:
@@ -260,9 +273,9 @@ def test_concave_fillet_90deg_is_not_hole(casts: None, geom_features: None) -> N
     fillet = _face("fillet", (_S, _S, 0), (0.8, 0.8, 0), (1, 1, 1), tag="cyl")
     fillet.pointOnFace = _v(1 - 0.2 * _S, 1 - 0.2 * _S, 0.5)
     fillet.geometry = SimpleNamespace(tag="cyl", axis=_v(0, 0, 1), origin=_v(1, 1, 0), radius=0.2)
-    fillet.evaluator = SimpleNamespace(
-        parametricRange=lambda: SimpleNamespace(minPoint=_v(0, 0, 0), maxPoint=_v(math.pi / 2, 0, 0))
-    )
+    fillet.evaluator = _arc_face(
+        math.pi, math.pi / 2
+    )  # trimmed 90 deg arc at 180..270 deg about (1,1); untrimmed u = 2pi
     e_a = _edge("fa", fillet, wall_a, (0.8, 1, 0), (0.8, 1, 1))
     e_b = _edge("fb", fillet, wall_b, (1, 0.8, 0), (1, 0.8, 1))
     body = _body([bed, wall_a, wall_b, fillet], [e_a, e_b])
@@ -325,6 +338,17 @@ def test_v_notch_needs_walls_at_90_deg(casts: None, geom_features: None, angle: 
     holes = facts_from_body(_vhole([wa, wb]))[1]
     assert len(holes) == 1
     assert holes[0].has_seam_notch is notch
+
+
+def test_notched_330_deg_hole_passes(casts: None, geom_features: None) -> None:
+    # 330 deg cylinder (30 deg notch gap, span >= FULL_CYLINDER_DEG) + two walls 90 deg apart = seam notch: one hole, no seam FAIL
+    wa = _face("wa", (1.0, 0.0, 0.0), (0.8, 0.8, 0), (1.2, 1.2, 1))
+    wb = _face("wb", (0.0, 1.0, 0.0), (0.8, 0.8, 0), (1.2, 1.2, 1))
+    body = _vhole([wa, wb], arc=(math.radians(15.0), math.radians(330.0)))
+    holes = facts_from_body(body)[1]
+    assert len(holes) == 1
+    assert holes[0].has_seam_notch is True
+    assert "seam_notch" not in [f.rule for f in dfam_check(body)]
 
 
 _CONE_N = (-0.5, -0.5, -_S)  # unit normal, 45 deg incline: |n_z| = 1/sqrt(2)
@@ -432,9 +456,7 @@ def _pin_body(*, inward_wall: bool = False) -> MagicMock:
     wall = _face("wall", (s * -_S, s * -_S, 0), (0.7, 0.7, 0.5), (1.3, 1.3, 1))
     wall.geometry = SimpleNamespace(tag="cyl", axis=_v(0, 0, 1), origin=_v(1, 1, 0), radius=0.3)
     wall.pointOnFace = _v(1 - 0.3 * _S, 1 - 0.3 * _S, 0.75)
-    wall.evaluator = SimpleNamespace(
-        parametricRange=lambda: SimpleNamespace(minPoint=_v(0, 0, 0), maxPoint=_v(2 * math.pi, 0, 0))
-    )
+    wall.evaluator = _arc_face(0.0, 2 * math.pi)
     e_base = _arc_edge("base_arc", plate, wall, (1 - 0.3 * _S, 1 - 0.3 * _S, 0.5), math.pi / 2 * 0.3)
     e_tip = _arc_edge("tip_arc", tip, wall, (1 - 0.3 * _S, 1 - 0.3 * _S, 1.0), math.pi / 2 * 0.3)
     return _body([plate, tip, wall], [e_base, e_tip])
@@ -494,3 +516,33 @@ def test_cone_width_without_top_edge_is_none() -> None:
     bed = _face("bed", (0, 0, -1), (0, 0, 0), (2, 2, 0))
     e_bed = _arc_edge("bed_arc", bed, cone, (0.2, 0.2, 0.0), 0.3)
     assert _cone_width_mm(cone, e_bed) is None
+
+
+def test_cone_width_top_is_max_z_edges_only() -> None:
+    # Measured live on pawl chamfer cone (mm): bed arc 1.2674 (z=0), top arc 0.8174 (z max), NURBS 1.1125 (z max),
+    # slant line 1.5987 (spans bed->top), lifted line 1.1036 (mid height). Old code summed the lifted line into L_top.
+    # Mid-height z of the lifted line assumed (0.05 cm); the 0.2319 NURBS not modelled (placement unknown).
+    bed_cm, top_cm, nurbs_cm, slant_cm, lifted_cm = 0.12674, 0.08174, 0.11125, 0.15987, 0.11036
+    old_mean_cm = (bed_cm + (top_cm + nurbs_cm + lifted_cm)) / 2
+    area_cm2 = 1.05 / 10 * old_mean_cm  # old code gives 1.05 mm on these edges
+    cone = _face("cone", _CONE_N, (0, 0, 0), (0.3, 0.3, 0.1), tag="cone", area=area_cm2)
+    bed = _face("bed", (0, 0, -1), (0, 0, 0), (2, 2, 0))
+    e_bed = _arc_edge("bed_arc", bed, cone, (0.2, 0.2, 0.0), bed_cm)
+    e_bed.boundingBox = SimpleNamespace(minPoint=_v(0, 0, 0), maxPoint=_v(0, 0, 0))
+
+    def add(token: str, lo: float, hi: float, length_cm: float) -> None:
+        e = SimpleNamespace(
+            tempId=token,
+            boundingBox=SimpleNamespace(minPoint=_v(0, 0, lo), maxPoint=_v(0, 0, hi)),
+            length=length_cm,
+        )
+        cone.edges.append(e)
+
+    add("top_arc", 0.1, 0.1, top_cm)
+    add("nurbs_top", 0.1, 0.1, nurbs_cm)
+    add("slant", 0.0, 0.1, slant_cm)
+    add("lifted", 0.05, 0.05, lifted_cm)
+    w = _cone_width_mm(cone, e_bed)
+    assert w == pytest.approx(area_cm2 / ((bed_cm + top_cm + nurbs_cm) / 2) * 10, abs=1e-6)
+    assert w == pytest.approx(1.4124, abs=1e-3)
+    assert w != pytest.approx(1.05, abs=1e-3)  # old code result

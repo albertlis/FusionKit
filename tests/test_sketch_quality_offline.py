@@ -58,7 +58,7 @@ def _rules(lines: list[str]) -> list[str]:
 
 
 def test_rules_derived_from_rule_funcs() -> None:
-    assert sketch_quality.RULES == frozenset(sketch_quality._RULE_FUNCS)
+    assert sketch_quality.RULES == frozenset(sketch_quality._RULE_FUNCS) | {"dup_sketch_cross_comp"}
     assert "underconstrained" in sketch_quality.RULES
 
 

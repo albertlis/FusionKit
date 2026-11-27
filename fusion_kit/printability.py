@@ -418,6 +418,21 @@ def _long_side_attachment(
     return max(across) - min(across), covered, max(along) - min(along)
 
 
+def _groove_roof_tri(verts: list[Vec], t: Tri) -> bool:
+    """Warp-groove ceiling triangle: all verts <= GROOVE_ROOF_MAX_MM above bed and min altitude (2A / longest edge)
+    <= GROOVE_ROOF_MAX_WIDTH_MM. Local test: a crossing grid of grooves is one connected region with a wide hull,
+    but each strip / crossing cell is still narrow."""
+    a, b, c = verts[t[0]], verts[t[1]], verts[t[2]]
+    if max(a[2], b[2], c[2]) > GROOVE_ROOF_MAX_MM + EPS_MM:
+        return False
+    cr = _cross(_sub(b, a), _sub(c, a))
+    two_area = math.sqrt(_dot(cr, cr))
+    longest = max(math.sqrt(_dot(_sub(p, q), _sub(p, q))) for p, q in ((a, b), (b, c), (c, a)))
+    if longest <= DEGEN_MM:
+        return False
+    return two_area / longest <= GROOVE_ROOF_MAX_WIDTH_MM + EPS_MM
+
+
 def _exempt_flat_regions(
     verts: list[Vec],
     tris: list[Tri],
@@ -432,7 +447,8 @@ def _exempt_flat_regions(
     """Triangle ids of flat planar regions (edge-connected, equal normal) exempt from overhang. Only regions already
     below min_angle are tested.
     groove_roof: all verts <= GROOVE_ROOF_MAX_MM above bed and min width <= GROOVE_ROOF_MAX_WIDTH_MM (warp-groove
-    ceiling, judged in the frame passed to check(), any orientation).
+    ceiling, judged in the frame passed to check(), any orientation); else per triangle (_groove_roof_tri), so a
+    crossing grid of grooves (one region, wide hull) exempts its narrow strips / cells.
     notch_bridge: span across the flanks <= NOTCH_BRIDGE_MAX_MM and BOTH long sides flanked by down-facing regions at >= min_angle
     - tol whose horizontal normals face each other (teardrop flanks). One flank only = ledge, stays flagged.
     short_ledge: attached along its long side (see _long_side_attachment): perpendicular width <= SHORT_LEDGE_MAX_MM and
@@ -484,6 +500,11 @@ def _exempt_flat_regions(
         ):
             exempt.update(idxs)
             continue
+        if groove_roof:
+            roof = {ti for ti in idxs if _groove_roof_tri(verts, tris[ti])}
+            exempt.update(roof)
+            if len(roof) == len(idxs):
+                continue
         attach = (
             _long_side_attachment(verts, tris, geoms, idxs, rid, edge_tris, region_of, g0[0]) if short_ledge else None
         )

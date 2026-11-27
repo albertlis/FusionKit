@@ -5,9 +5,18 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-from fusion_kit.dfam_geom import _has_attr
+from fusion_kit.dfam_geom import _box_mm, _has_attr
 from fusion_kit.dfam_limits import SIG_TOL_CM
-from fusion_kit.dfam_types import BED_ATTR, BED_DIRS, DFAM_GROUP, GRIP_FIN_ATTR, MATING_ATTR, BedDir, Vec
+from fusion_kit.dfam_types import (
+    BED_ATTR,
+    BED_DIRS,
+    BED_LOOP_SKIP_ATTR,
+    DFAM_GROUP,
+    GRIP_FIN_ATTR,
+    MATING_ATTR,
+    BedDir,
+    Vec,
+)
 
 if TYPE_CHECKING:  # annotations only; runtime adsk import stays lazy inside functions
     import adsk.core
@@ -44,6 +53,76 @@ def set_bed(body: adsk.fusion.BRepBody, bed: BedDir) -> BedDir:
     bed_axis(bed)
     body.attributes.add(DFAM_GROUP, BED_ATTR, bed)
     return bed
+
+
+BED_LOOP_SKIP_TOL_MM = 0.05  # recorded inner-loop centre vs print-frame loop centre: match tolerance (mm)
+
+
+def format_loop_centres(centres: list[Vec]) -> str:
+    """Centres (mm) -> attr value "x,y,z;x,y,z" (3 decimals). Pure."""
+    return ";".join(f"{x:.3f},{y:.3f},{z:.3f}" for x, y, z in centres)
+
+
+def parse_loop_centres(value: str) -> list[Vec]:
+    """Attr value -> centres (mm); empty entries ignored. Pure."""
+    out: list[Vec] = []
+    for part in value.split(";"):
+        if part:
+            x, y, z = (float(v) for v in part.split(","))
+            out.append((x, y, z))
+    return out
+
+
+def loop_centres_from_body(body: adsk.fusion.BRepBody) -> list[Vec]:
+    """Recorded skipped inner-loop centres (original frame, mm) from ("dfam", "bed_loop_skip"). Absent -> []."""
+    attr = body.attributes.itemByName(DFAM_GROUP, BED_LOOP_SKIP_ATTR)
+    return [] if attr is None else parse_loop_centres(attr.value)
+
+
+def add_bed_loop_skips(body: adsk.fusion.BRepBody, centres: list[Vec]) -> str:
+    """Merge centres into ("dfam", "bed_loop_skip"), dedupe within BED_LOOP_SKIP_TOL_MM. Attributes.add upserts. Returns value."""
+    merged = loop_centres_from_body(body)
+    for c in centres:
+        if not any(all(abs(c[i] - m[i]) <= BED_LOOP_SKIP_TOL_MM for i in range(3)) for m in merged):
+            merged.append(c)
+    value = format_loop_centres(merged)
+    body.attributes.add(DFAM_GROUP, BED_LOOP_SKIP_ATTR, value)
+    return value
+
+
+def print_frame_centre_mm(c_mm: Vec, bed: str, lo_mm: Vec, hi_mm: Vec) -> Vec:
+    """Original-frame mm point -> print frame: rotate by bed_rotation_axes(bed), shift so rotated bbox min z = 0
+    (same ops as print_frame_with_tags). lo_mm/hi_mm = original body bbox. '-z' -> unchanged. Pure."""
+    if bed == "-z":
+        return c_mm
+    axes = bed_rotation_axes(bed)
+    corners = [
+        rotate_point((x, y, z), axes)
+        for x in (lo_mm[0], hi_mm[0])
+        for y in (lo_mm[1], hi_mm[1])
+        for z in (lo_mm[2], hi_mm[2])
+    ]
+    zmin = min(p[2] for p in corners)
+    r = rotate_point(c_mm, axes)
+    return (r[0], r[1], r[2] - zmin)
+
+
+def print_frame_loop_centres(body: adsk.fusion.BRepBody, bed: str) -> list[Vec]:
+    """Recorded skipped inner-loop centres of ORIGINAL body -> print-frame mm centres for dfam facts. [] if none."""
+    centres = loop_centres_from_body(body)
+    if not centres:
+        return []
+    lo, hi = _box_mm(body.boundingBox)
+    return [print_frame_centre_mm(c, bed, lo, hi) for c in centres]
+
+
+def loop_tokens_at_centres(loops: list[tuple[Vec, list[int]]], centres: list[Vec]) -> set[int]:
+    """tempIds of every (loop centre, tempIds) whose centre matches a recorded centre within BED_LOOP_SKIP_TOL_MM. Pure."""
+    out: set[int] = set()
+    for centre, ids in loops:
+        if any(all(abs(centre[i] - c[i]) <= BED_LOOP_SKIP_TOL_MM for i in range(3)) for c in centres):
+            out.update(ids)
+    return out
 
 
 def bed_rotation_axes(bed: str) -> tuple[Vec, Vec, Vec]:

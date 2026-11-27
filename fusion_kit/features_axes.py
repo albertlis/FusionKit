@@ -79,7 +79,7 @@ def _axis_by_planes(
     if not inp.setByTwoPlanes(pa, pb):
         raise RuntimeError(f"axis {names}: setByTwoPlanes failed")
     axis = comp.constructionAxes.add(inp)
-    axis.name = check_label(label)  # set_label() types exclude ConstructionAxis; same effect
+    set_label(axis, label)
     axis.isLightBulbOn = False
     return axis
 

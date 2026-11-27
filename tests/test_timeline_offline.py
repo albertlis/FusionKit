@@ -63,10 +63,33 @@ def test_check_label_rejects_non_snake_case(label: str) -> None:
 # ---------------------------------------------------------------------------
 # set_label(): validated assignment to entity.name
 # ---------------------------------------------------------------------------
+def _attrs_stub() -> SimpleNamespace:
+    """Fusion entity .attributes: nothing stored, add() is a no-op. set_label -> _tag_source needs it."""
+    return SimpleNamespace(itemByName=lambda g, n: None, add=lambda g, n, v: None)
+
+
 def test_set_label_assigns_checked_name() -> None:
-    entity: Any = SimpleNamespace(name="Sketch12")
+    entity: Any = SimpleNamespace(name="Sketch12", attributes=_attrs_stub())
     set_label(entity, "mount_hole")
     assert entity.name == "mount_hole"
+
+
+def test_set_label_tags_source_with_caller_line() -> None:
+    recorded: list[tuple[str, str, str]] = []
+    attrs = SimpleNamespace(itemByName=lambda g, n: None, add=lambda g, n, v: recorded.append((g, n, v)))
+    entity: Any = SimpleNamespace(name="Sketch12", attributes=attrs)
+    lineno = sys._getframe().f_lineno + 1
+    set_label(entity, "mount_hole")
+    assert recorded == [("fk", "src", f"test_timeline_offline.py:{lineno}")]
+
+
+def test_set_label_deletes_existing_source_before_add() -> None:
+    calls: list[str] = []
+    old = SimpleNamespace(deleteMe=lambda: calls.append("delete"))
+    attrs = SimpleNamespace(itemByName=lambda g, n: old, add=lambda g, n, v: calls.append("add"))
+    entity: Any = SimpleNamespace(name="Sketch12", attributes=attrs)
+    set_label(entity, "mount_hole")
+    assert calls == ["delete", "add"]
 
 
 def test_set_label_invalid_keeps_previous_name() -> None:

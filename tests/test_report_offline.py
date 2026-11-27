@@ -14,7 +14,16 @@ from unittest.mock import MagicMock, call
 import pytest
 
 from fusion_kit import enums
-from fusion_kit.report import format_report, inside, inside_runs, interference, overhangs, report_data, world_bbox
+from fusion_kit.report import (
+    design_stats,
+    format_report,
+    inside,
+    inside_runs,
+    interference,
+    overhangs,
+    report_data,
+    world_bbox,
+)
 
 _FUS: Any = sys.modules["adsk.fusion"]
 _CORE: Any = sys.modules["adsk.core"]
@@ -436,3 +445,26 @@ def test_report_data_all_suppressed_error_features_zero_unhealthy(report_design:
     )
     data = report_data(_empty_comp(), dfam=False)
     assert (data.unhealthy, data.suppressed) == (0, 3)
+
+
+class _CountedItems(list[Any]):
+    """Timeline item list that counts index reads (test double only)."""
+
+    gets = 0
+
+    def __getitem__(self, i: Any) -> Any:
+        self.gets += 1
+        return super().__getitem__(i)
+
+
+def test_report_data_with_stats_reads_no_timeline(report_design: Callable[[list[Any]], None]) -> None:
+    """design_stats walks the timeline once; report_data(stats=...) per comp must not walk it again."""
+    error = _FUS.FeatureHealthStates.ErrorFeatureHealthState
+    items = _CountedItems([_feature("broken", health=error, suppressed=False)])
+    report_design(items)
+    stats = design_stats(_FUS.Design.cast(None))
+    assert (stats.unhealthy, stats.suppressed) == (1, 0)
+    items.gets = 0
+    for _ in range(3):
+        assert report_data(_empty_comp(), dfam=False, stats=stats, skq=False).unhealthy == 1
+    assert items.gets == 0

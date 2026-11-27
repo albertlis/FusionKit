@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from fusion_kit._vec import _cross, _dot, _norm, _scale, _sub, _unit
-from fusion_kit.dfam_bed import bed_axis
+from fusion_kit.dfam_bed import bed_axis, loop_tokens_at_centres
 from fusion_kit.dfam_geom import (
     _adjacent,
     _bed_leg_mm,
@@ -54,6 +54,14 @@ if TYPE_CHECKING:  # annotations only; runtime adsk import stays lazy inside fun
     import adsk.fusion
 
 
+def _loop_centre_mm(edges: list[adsk.fusion.BRepEdge]) -> Vec:
+    """Bounding-box centre of a loop (edge bboxes united), mm. Same rule as features_bed._loop_centre_mm."""
+    boxes = [_box_mm(e.boundingBox) for e in edges]
+    lo = (min(b[0][0] for b in boxes), min(b[0][1] for b in boxes), min(b[0][2] for b in boxes))
+    hi = (max(b[1][0] for b in boxes), max(b[1][1] for b in boxes), max(b[1][2] for b in boxes))
+    return ((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2)
+
+
 def _grip_fin_section(body: adsk.fusion.BRepBody) -> float | None:
     """grip_fit min fin width (mm) from body attr (DFAM_GROUP, GRIP_FIN_SECTION_ATTR); None if absent.
 
@@ -68,7 +76,9 @@ def _grip_fin_section(body: adsk.fusion.BRepBody) -> float | None:
 
 
 def facts_from_body(
-    body: adsk.fusion.BRepBody, tags: dict[str, frozenset[int]] | None = None
+    body: adsk.fusion.BRepBody,
+    tags: dict[str, frozenset[int]] | None = None,
+    bed_loop_centres: list[Vec] | None = None,
 ) -> tuple[BodyFact, list[HoleFact], list[EdgeFact]]:
     """Body -> (BodyFact, holes, edges). Units cm -> mm. tags: print-frame tempId sets (print_frame_with_tags); None = read attrs.
 
@@ -163,9 +173,9 @@ def facts_from_body(
         groups.setdefault(key, []).append(item)
     for members in groups.values():
         faces = [m[0] for m in members]
-        if not is_full_cylinder(sum(_span_deg(f) for f in faces)):
-            continue  # partial concave arc (fillet): not a hole
         _f0, ax, origin, r = members[0]
+        if not is_full_cylinder(sum(_span_deg(f, ax, origin, r) for f in faces)):
+            continue  # partial concave arc (fillet): not a hole
         vertical = abs(ax[2]) > AXIS_PARALLEL
         adj: dict[int, adsk.fusion.BRepFace] = {}
         for f in faces:
@@ -201,6 +211,16 @@ def facts_from_body(
         )
 
     bed_tokens = {e.tempId for f in bed for lp in f.loops if lp.isOuter for e in lp.edges}
+    if (
+        bed_loop_centres
+    ):  # inner loops bed_chamfer(inner_loops) left sharp: their rim is a bed edge (FAIL unless dfam_skip)
+        inner = [
+            (_loop_centre_mm(list(lp.edges)), [e.tempId for e in lp.edges])
+            for f in bed
+            for lp in f.loops
+            if not lp.isOuter
+        ]
+        bed_tokens |= loop_tokens_at_centres(inner, bed_loop_centres)
     rows: list[tuple[adsk.fusion.BRepEdge, EdgeKind, float | None, list[adsk.fusion.BRepFace]]] = []
     for e in body_edges:
         faces = edge_faces[e.tempId]
@@ -260,6 +280,8 @@ def facts_from_body(
                     n_g = _normal(g, e.pointOnEdge)
                     if max(abs(c) for c in n_g) > AXIS_PARALLEL:
                         continue  # axis-aligned face: not a chamfer
+                    if kind == "bed" and abs(n_g[2]) < CONE_TILT_TOL:
+                        continue  # vertical flank (n_z ~ 0), e.g. 45 deg V seam wall: not a chamfer
                     width = g.area / e.length * 10  # chamfer face width, mm
                     if kind == "bed":
                         width = _planar_width_mm(g, e)  # trapezoid: area / mean(bed edge, top edge)

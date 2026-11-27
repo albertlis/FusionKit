@@ -19,9 +19,19 @@ def P(x: float, y: float, z: float) -> Any:
     return SimpleNamespace(x=x, y=y, z=z)
 
 
-def _attrs(value: str | None = None) -> Any:
-    attr = None if value is None else SimpleNamespace(value=value)
-    return SimpleNamespace(itemByName=lambda group, name: attr)
+def _attrs(value: str | None = None, role: str | None = None, warp: bool = False) -> Any:
+    """Feature attributes: skq/skq_skip = value, fk/role = role, dfam/warp_groove = tag when warp; any other (group, name) -> None (like adsk)."""
+    table = {
+        (fq.ATTR_GROUP, fq.ATTR_NAME): value,
+        (fq.ROLE_GROUP, fq.ROLE_NAME): role,
+        (fq.DFAM_GROUP, fq.WARP_GROOVE_ATTR): "1" if warp else None,
+    }
+
+    def item(group: str, name: str) -> Any:
+        v = table.get((group, name))
+        return None if v is None else SimpleNamespace(value=v)
+
+    return SimpleNamespace(itemByName=item)
 
 
 def _obj(otype: str, ns: str = "fusion", **kw: Any) -> Any:
@@ -440,3 +450,375 @@ def test_brep_face_profile_skipped_no_crash() -> None:
             assert fn(ent, earlier) is None, rule
     design = _design([("Base", base), ("cut_face", cut), ("join_face", join)])
     assert fq.check(design) == []
+
+
+# ---------------------------------------------------------------------------
+# single pass: running index, each body face read once, budget stop
+# ---------------------------------------------------------------------------
+class _CountingFace:
+    """BRepFace stand-in: every .geometry read increments reads[0]."""
+
+    def __init__(self, token: str, geom: Any, reads: list[int]) -> None:
+        self.entityToken = token
+        self._geom = geom
+        self._reads = reads
+
+    @property
+    def geometry(self) -> Any:
+        self._reads[0] += 1
+        return self._geom
+
+
+def _timeline_of_bodies(n: int, faces_per_body: int, reads: list[int]) -> Any:
+    """n extrudes, each on its own body with faces_per_body planar faces at 1..faces_per_body mm (no end match)."""
+    items: list[tuple[str, Any]] = []
+    for k in range(n):
+        faces = [
+            _CountingFace(
+                f"b{k}f{j}", _obj("Plane", ns="core", origin=P(0, 0, (1.0 + j) / 10.0), normal=P(0, 0, 1)), reads
+            )
+            for j in range(faces_per_body)
+        ]
+        body = SimpleNamespace(entityToken=f"b{k}", faces=_coll(*faces))
+        items.append((f"ext{k}", _extrude(_profile(f"p{k}"), _dist(5.0), bodies=[body])))
+    return _design(items)
+
+
+def test_check_reads_each_body_face_once() -> None:
+    small: list[int] = [0]
+    big: list[int] = [0]
+    assert fq.check(_timeline_of_bodies(20, 4, small)) == []
+    assert fq.check(_timeline_of_bodies(40, 4, big)) == []
+    assert small[0] == 20 * 4
+    assert big[0] == 40 * 4  # linear in T: doubling T doubles reads (old prefix rescan: ~4x)
+
+
+def _circle_loop(token: str) -> Any:
+    """Profile loop of one SketchCircle with entityToken (thin rule reads the token)."""
+    curve = SimpleNamespace(sketchEntity=_obj("SketchCircle", entityToken=token))
+    return SimpleNamespace(profileCurves=_coll(curve))
+
+
+def _mixed_design() -> Any:
+    """Timeline hitting every rule once: cross-body plane, own end cap that must be ignored, twin, cut, hole, offset midplane,
+    edge_by_edge, BRepFace profile skipped, thin-as-offset."""
+    body_a = SimpleNamespace(entityToken="A", faces=_coll(_end_face("old_face", z_cm=1.0)))
+    body_b = SimpleNamespace(entityToken="B", faces=_coll(_end_face("own_cap", z_cm=1.2)))
+    return _design(
+        [
+            ("Plane20", _plane_at_z_mm(20.0)),
+            ("base", _extrude(_profile("p1"), _dist(5.0), bodies=[body_a])),
+            (
+                "cap_join",
+                _extrude(_profile("p3"), _dist(12.0), bodies=[body_b], endFaces=_coll(_end_face("own_cap", z_cm=1.2))),
+            ),
+            ("lid", _extrude(_profile("p2"), _dist(20.0))),
+            ("lid_mirror", _extrude(_profile("p2"), _dist(-20.0))),
+            ("cut_deep", _extrude(_profile("p4"), _dist(30.0), op=CUT, bodies=[_cut_body()])),
+            ("hole1", _extrude(_profile("p5", loops=[_circle_loop("circ")]), _dist(3.0), op=CUT)),
+            ("wall_mid", _offset_plane("wall_h/2")),
+            ("r1", _fillet("r_lid")),
+            ("r2", _fillet("r_lid")),
+            ("face_cut", _extrude(_brep_profile("f9"), _dist(10.0), op=CUT, bodies=[_cut_body()])),
+            ("thin_ok", _extrude(_offset_profile(["c1", "c2"], ["c1", "c2"]), _dist(10.0))),
+        ]
+    )
+
+
+MIXED_FINDINGS: list[str] = [  # produced by the pre-change (prefix-rescan) implementation on _mixed_design()
+    "SKQ_WARN extent_distance_matches_body: lid distance 20.00 mm ends on an earlier face/plane -> use to= (ToEntityExtent)",
+    "SKQ_WARN extent_distance_matches_body: lid_mirror distance 20.00 mm ends on an earlier face/plane -> use to= (ToEntityExtent)",
+    "SKQ_WARN twin_extrudes: lid_mirror opposite-sign extrude of same profile as lid -> symmetric / two sides",
+    "SKQ_WARN cut_blind_through: cut_deep cut 30.00 mm runs past body end at 10.00 mm -> through_all",
+    "SKQ_WARN hole_as_extrude: hole1 cut of a single circle profile -> holes.hole_simple / holes.hole_counterbore",
+    "SKQ_WARN plane_offset_expr: wall_mid offset 'wall_h/2' is half a distance -> plane_midplane (Midplane)",
+    "SKQ_WARN extent_distance_matches_body: thin_ok distance 10.00 mm ends on an earlier face/plane -> use to= (ToEntityExtent)",
+    "SKQ_WARN thin_as_offset: thin_ok profile drawn as offset curves -> thin extrude (thickness param)",
+    "SKQ_WARN edge_by_edge: r2 same r_lid as r1 -> one edge set, tangent chain",
+]
+
+
+def test_check_findings_equal_old_implementation() -> None:
+    assert fq.check(_mixed_design()) == MIXED_FINDINGS
+
+
+def test_check_budget_stops_with_skip_line() -> None:
+    design = _design(
+        [
+            ("Plane1", _plane_at_z_mm(10.0)),
+            ("lid_a", _extrude(_profile(), _dist(10.0))),
+            ("filler", _feat("ExtrudeFeature")),
+            ("lid_b", _extrude(_profile(), _dist(10.0))),
+        ]
+    )
+    calls = [0]
+
+    def over_after_two() -> bool:
+        calls[0] += 1
+        return calls[0] > 2
+
+    assert fq.check(design, over_budget=over_after_two) == [
+        "SKQ_WARN extent_distance_matches_body: lid_a distance 10.00 mm ends on an earlier face/plane -> use to= (ToEntityExtent)",
+        "SKIP fq budget: 2 of 4 entries not checked",
+    ]
+    assert calls[0] == 3  # polled before each entry; stopped at entry index 2
+    assert fq.check(design, over_budget=lambda: True) == ["SKIP fq budget: 4 of 4 entries not checked"]
+
+
+# ---------------------------------------------------------------------------
+# finishing ops: fillet / chamfer last on a body, one feature per kind (finishing_not_last, finishing_split)
+# ---------------------------------------------------------------------------
+def _on_body(otype: str, token: str, skip: str | None = None, role: str | None = None, warp: bool = False) -> Any:
+    return _obj(
+        otype,
+        isSuppressed=False,
+        attributes=_attrs(skip, role, warp),
+        bodies=_coll(SimpleNamespace(entityToken=token)),
+        operation=JOIN,
+        profile=None,
+        extentOne=None,
+        extentTwo=None,
+        isThinExtrude=False,
+    )
+
+
+def _fillet_on(token: str, skip: str | None = None) -> Any:
+    return _on_body("FilletFeature", token, skip)
+
+
+def _chamfer_on(token: str, skip: str | None = None) -> Any:
+    return _on_body("ChamferFeature", token, skip)
+
+
+def _fin_check(items: list[tuple[str, Any]]) -> list[str]:
+    return fq.check(_design(items))
+
+
+def test_finishing_not_last_fillet_then_extrude_same_body() -> None:
+    assert _fin_check([("r_outer", _fillet_on("A")), ("pocket", _on_body("ExtrudeFeature", "A"))]) == [
+        "SKQ_WARN finishing_not_last: pocket r_outer (FilletFeature) on same body is not last -> fillet/chamfer after ExtrudeFeature",
+        "SKQ_WARN finish_ops_order: pocket after fillet on A -> move before finishing block (timeline order)",
+    ]
+
+
+@pytest.mark.parametrize(
+    "otype",
+    [
+        "ExtrudeFeature",
+        "RevolveFeature",
+        "CombineFeature",
+        "RectangularPatternFeature",
+        "CircularPatternFeature",
+        "MirrorFeature",
+    ],
+)
+def test_finishing_not_last_every_modifier_kind(otype: str) -> None:
+    got = _fin_check([("ch", _chamfer_on("A")), ("mod", _on_body(otype, "A"))])
+    assert got == [
+        f"SKQ_WARN finishing_not_last: mod ch (ChamferFeature) on same body is not last -> fillet/chamfer after {otype}",
+        "SKQ_WARN finish_ops_order: mod after chamfer on A -> move before finishing block (timeline order)",
+    ]
+
+
+def test_finishing_no_hit_modifier_on_other_body() -> None:
+    assert _fin_check([("r", _fillet_on("A")), ("pocket", _on_body("ExtrudeFeature", "B"))]) == []
+
+
+def test_finishing_no_hit_fillet_is_last() -> None:
+    assert _fin_check([("base", _on_body("ExtrudeFeature", "A")), ("r", _fillet_on("A"))]) == []
+
+
+def test_finishing_warp_grooves_after_bed_chamfer_exempt() -> None:
+    assert _fin_check([("bed_chamfer", _chamfer_on("A")), ("warp_grooves", _on_body("ExtrudeFeature", "A"))]) == []
+
+
+def test_finishing_warp_labeled_fillet_exempt() -> None:
+    assert _fin_check([("warp_corner_fillet", _fillet_on("A")), ("pocket", _on_body("ExtrudeFeature", "A"))]) == []
+
+
+def test_finishing_not_last_reported_once_per_op() -> None:
+    got = [
+        line
+        for line in _fin_check(
+            [("r", _fillet_on("A")), ("p1", _on_body("ExtrudeFeature", "A")), ("p2", _on_body("ExtrudeFeature", "A"))]
+        )
+        if line.startswith("SKQ_WARN finishing_not_last:")
+    ]
+    assert len(got) == 1
+    assert got[0].startswith("SKQ_WARN finishing_not_last: p1 ")
+
+
+def test_finishing_split_second_fillet_same_body() -> None:
+    assert _fin_check([("r1", _fillet_on("A")), ("r2", _fillet_on("A"))]) == [
+        "SKQ_WARN finishing_split: r2 2nd fillet on same body (first: r1) -> one feature: features.fillet_groups"
+    ]
+
+
+def test_finishing_split_second_chamfer_same_body() -> None:
+    assert _fin_check([("c1", _chamfer_on("A")), ("c2", _chamfer_on("A"))]) == [
+        "SKQ_WARN finishing_split: c2 2nd chamfer on same body (first: c1) -> one feature: features.chamfer_groups"
+    ]
+
+
+def test_finishing_split_third_op_not_repeated() -> None:
+    got = _fin_check([("r1", _fillet_on("A")), ("r2", _fillet_on("A")), ("r3", _fillet_on("A"))])
+    assert len(got) == 1
+    assert got[0].startswith("SKQ_WARN finishing_split: r2 ")
+
+
+def test_finishing_split_no_hit_one_per_kind_or_other_body() -> None:
+    assert _fin_check([("r1", _fillet_on("A")), ("c1", _chamfer_on("A")), ("r2", _fillet_on("B"))]) == []
+
+
+def _bed_chamfer_tagged(token: str) -> Any:
+    """Chamfer as built by features_bed.bed_chamfer: attribute fk/role = bed_chamfer, label not required."""
+    return _on_body("ChamferFeature", token, role=fq.ROLE_BED_CHAMFER)
+
+
+def test_finishing_split_bed_chamfer_tagged_not_first() -> None:
+    # tagged bed chamfer is not counted as first: the plain chamfer after it is the first counted one
+    assert _fin_check([("housing_bed_chamfer", _bed_chamfer_tagged("A")), ("c1", _chamfer_on("A"))]) == []
+
+
+def test_finishing_split_bed_chamfer_tagged_not_second() -> None:
+    assert _fin_check([("c1", _chamfer_on("A")), ("bed", _bed_chamfer_tagged("A"))]) == []
+
+
+def test_finishing_split_tagged_bed_chamfer_without_bed_label_exempt() -> None:
+    # attribute decides, label irrelevant
+    assert _fin_check([("c1", _chamfer_on("A")), ("outer_edge_break", _bed_chamfer_tagged("A"))]) == []
+
+
+def test_finishing_split_bed_chamfer_label_fallback_not_counted() -> None:
+    # no attribute (older build): label containing bed_chamfer is enough, either position
+    assert _fin_check([("c1", _chamfer_on("A")), ("housing_bed_chamfer", _chamfer_on("A"))]) == []
+    assert _fin_check([("wall_bracket_bed_chamfer", _chamfer_on("A")), ("c1", _chamfer_on("A"))]) == []
+
+
+def test_finishing_split_two_bed_chamfers_no_hit() -> None:
+    assert _fin_check([("bed_a", _bed_chamfer_tagged("A")), ("bed_b", _bed_chamfer_tagged("A"))]) == []
+
+
+def test_finishing_split_plain_chamfer_after_bed_chamfer_is_first() -> None:
+    # bed chamfer exempt; the 2nd plain chamfer is the 2nd counted one -> WARN, first = c1
+    assert _fin_check([("bed", _bed_chamfer_tagged("A")), ("c1", _chamfer_on("A")), ("c2", _chamfer_on("A"))]) == [
+        "SKQ_WARN finishing_split: c2 2nd chamfer on same body (first: c1) -> one feature: features.chamfer_groups"
+    ]
+
+
+def test_finishing_split_bed_label_on_fillet_not_exempt() -> None:
+    # exemption is chamfer-only: a fillet with bed_chamfer in its name still counts
+    assert _fin_check([("r1", _fillet_on("A")), ("bed_chamfer_fillet", _fillet_on("A"))]) == [
+        "SKQ_WARN finishing_split: bed_chamfer_fillet 2nd fillet on same body (first: r1) -> one feature: features.fillet_groups"
+    ]
+
+
+def test_finishing_bed_chamfer_still_not_last_checked() -> None:
+    # exemption is finishing_split only: a bed chamfer followed by a plain extrude still WARNs finishing_not_last
+    assert _fin_check(
+        [("housing_bed_chamfer", _bed_chamfer_tagged("A")), ("pocket", _on_body("ExtrudeFeature", "A"))]
+    ) == [
+        "SKQ_WARN finishing_not_last: pocket housing_bed_chamfer (ChamferFeature) on same body is not last -> fillet/chamfer after ExtrudeFeature",
+        "SKQ_WARN finish_ops_order: pocket after chamfer on A -> move before finishing block (timeline order)",
+    ]
+
+
+def test_finishing_opt_out_split_and_not_last() -> None:
+    assert _fin_check([("r1", _fillet_on("A")), ("r2", _fillet_on("A", "finishing_split:two radii on purpose"))]) == []
+    got = _fin_check(
+        [
+            ("r1", _fillet_on("A", "finishing_not_last:needed before pocket")),
+            ("pocket", _on_body("ExtrudeFeature", "A")),
+        ]
+    )
+    assert [line for line in got if "finishing_not_last" in line] == []
+
+
+# ---------------------------------------------------------------------------
+# warp_not_last: warp relief grooves are the last features of a body (after bed chamfer and every other op)
+# ---------------------------------------------------------------------------
+def _groove(token: str, name: str = "warp_grooves") -> tuple[str, Any]:
+    return (name, _on_body("ExtrudeFeature", token, warp=True))
+
+
+def _after(kind: str, name: str = "warp_grooves") -> str:
+    return f"{kind} after warp groove {name} on same body -> grooves last"
+
+
+def test_warp_not_last_extrude_after_groove_same_body() -> None:
+    assert _fin_check([_groove("A"), ("pocket", _on_body("ExtrudeFeature", "A"))]) == [
+        f"SKQ_WARN warp_not_last: pocket {_after('ExtrudeFeature')}"
+    ]
+
+
+def test_warp_not_last_bed_chamfer_after_groove() -> None:
+    assert _fin_check([_groove("A"), ("housing_bed_chamfer", _chamfer_on("A"))]) == [
+        f"SKQ_WARN warp_not_last: housing_bed_chamfer {_after('ChamferFeature')}"
+    ]
+
+
+@pytest.mark.parametrize(
+    "otype",
+    [
+        "FilletFeature",
+        "ChamferFeature",
+        "ExtrudeFeature",
+        "RevolveFeature",
+        "CombineFeature",
+        "RectangularPatternFeature",
+        "CircularPatternFeature",
+        "MirrorFeature",
+    ],
+)
+def test_warp_not_last_every_kind(otype: str) -> None:
+    assert _fin_check([_groove("A"), ("mod", _on_body(otype, "A"))]) == [f"SKQ_WARN warp_not_last: mod {_after(otype)}"]
+
+
+def test_warp_not_last_untagged_name_fallback() -> None:
+    # no attribute (older build): a feature named warp... is the groove
+    assert _fin_check(
+        [("warp_grooves", _on_body("ExtrudeFeature", "A")), ("pocket", _on_body("ExtrudeFeature", "A"))]
+    ) == [f"SKQ_WARN warp_not_last: pocket {_after('ExtrudeFeature')}"]
+
+
+def test_warp_not_last_untagged_cut_is_not_a_groove() -> None:
+    assert _fin_check([("relief", _on_body("ExtrudeFeature", "A")), ("pocket", _on_body("ExtrudeFeature", "A"))]) == []
+
+
+def test_warp_not_last_tag_decides_not_label() -> None:
+    assert _fin_check([_groove("A", "cut_a"), ("pocket", _on_body("ExtrudeFeature", "A"))]) == [
+        f"SKQ_WARN warp_not_last: pocket {_after('ExtrudeFeature', 'cut_a')}"
+    ]
+
+
+def test_warp_tagged_groove_not_a_finishing_modifier() -> None:
+    # tagged groove with a plain name is exempt from finishing_not_last like a warp-labeled one
+    assert _fin_check([("r", _fillet_on("A")), _groove("A", "cut_a")]) == []
+
+
+def test_warp_not_last_no_hit_other_body_or_before_groove() -> None:
+    assert _fin_check([("pocket", _on_body("ExtrudeFeature", "A")), _groove("A")]) == []
+    assert _fin_check([_groove("A"), ("pocket", _on_body("ExtrudeFeature", "B"))]) == []
+
+
+def test_warp_not_last_reported_at_each_later_feature() -> None:
+    assert _fin_check(
+        [_groove("A"), ("p1", _on_body("ExtrudeFeature", "A")), ("p2", _on_body("ExtrudeFeature", "A"))]
+    ) == [
+        f"SKQ_WARN warp_not_last: p1 {_after('ExtrudeFeature')}",
+        f"SKQ_WARN warp_not_last: p2 {_after('ExtrudeFeature')}",
+    ]
+
+
+def test_warp_not_last_warp_named_and_second_groove_exempt() -> None:
+    assert _fin_check([_groove("A"), ("warp_corner_fillet", _fillet_on("A"))]) == []
+    assert _fin_check([_groove("A"), _groove("A", "warp_grooves_2")]) == []
+
+
+def test_warp_not_last_opt_out() -> None:
+    assert (
+        _fin_check(
+            [_groove("A"), ("pocket", _on_body("ExtrudeFeature", "A", "warp_not_last:pocket needs groove first"))]
+        )
+        == []
+    )

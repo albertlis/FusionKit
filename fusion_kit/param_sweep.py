@@ -374,15 +374,29 @@ def _read_bodies(design: adsk.fusion.Design) -> tuple[BodyFact, ...]:
     return tuple(out)
 
 
+PRINT_GROUP = "print"  # mirror of build_check.PRINT_GROUP (build_check imports this module, so no import back)
+NOT_PRINTED_ATTR = (
+    "not_printed"  # mirror of build_check.NOT_PRINTED_ATTR; tests/test_not_printed_sweep_offline.py round-trips it
+)
+
+
+def _not_printed(body: adsk.fusion.BRepBody) -> bool:
+    """True when build_check.mark_not_printed flagged the body (same attribute as build_check.not_printed_from_body)."""
+    return body.attributes.itemByName(PRINT_GROUP, NOT_PRINTED_ATTR) is not None
+
+
 def body_verdict(body: adsk.fusion.BRepBody, up_rot: Rot) -> BodyVerdict:
     """(DfAM FAIL 'rule: msg' tuple, print overhang mm2, print ok, print fail reason) for one body. Reason '' when ok.
 
     Same calls as build_check._body_check: dfam_check(body) (reads the body's stored bed) and check_body(body, up_rot).
     Prints TIME dfam:<body> and TIME check:<body>.
+    Flagged not_printed body (build_check.mark_not_printed): ok verdict (no FAIL, no reason), no DfAM / print call, no TIME lines.
 
     -> (FAIL findings as 'rule: msg', print overhang mm2, print ok) per body: same calls as
     build_check._body_check (dfam_check reads the stored bed, check_body in up_rot). Fusion side
     """
+    if _not_printed(body):
+        return (), 0.0, True, ""
     t0 = time.perf_counter()
     fails = tuple(f"{f.rule}: {f.msg}" for f in dfam_check(body) if f.level == "FAIL")
     print(f"TIME dfam:{body.name} {time.perf_counter() - t0:.2f}")
@@ -412,11 +426,11 @@ class _VerdictCache:
     hits = reused verdicts."""
 
     def __init__(self) -> None:
-        self._store: dict[tuple[tuple[int, ...], Rot, bool], BodyVerdict] = {}
+        self._store: dict[tuple[tuple[int, ...], Rot, bool, bool], BodyVerdict] = {}
         self.hits = 0
 
     def verdict(self, body: adsk.fusion.BRepBody, up_rot: Rot, suppressed: bool = False) -> BodyVerdict:
-        key = (_fingerprint(body), up_rot, suppressed)
+        key = (_fingerprint(body), up_rot, suppressed, _not_printed(body))  # flag in key: twin geometry, other verdict
         found = self._store.get(key)
         if found is not None:
             self.hits += 1

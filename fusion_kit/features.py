@@ -52,9 +52,7 @@ from fusion_kit.features_bed import (
     _BED_FLAT_TOL_CM,
     _BED_MAX_NZ,
     _bed_dihedral_deg,
-    _bed_inner_edges,
-    _bed_loop_edges,
-    _bed_outer_edges,
+    _bed_loops,
     bed_chamfer,
 )
 
@@ -87,10 +85,12 @@ from fusion_kit.features_edges import (
     _xy_hit,
     chamfer,
     chamfer_greedy,
+    chamfer_groups,
     convex_edges,
     edges_at_xy,
     faces_by_normal,
     fillet,
+    fillet_groups,
     planar_faces,
     select_edges,
 )

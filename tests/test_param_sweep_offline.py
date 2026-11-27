@@ -270,6 +270,9 @@ def _body(
             maxPoint=SimpleNamespace(x=x_cm, y=1.0, z=1.0),
         ),
         verdict=verdict,
+        attributes=SimpleNamespace(
+            itemByName=lambda group, name: None
+        ),  # real body_verdict reads not_printed (none set)
     )
 
 

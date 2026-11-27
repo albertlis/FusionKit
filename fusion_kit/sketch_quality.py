@@ -24,6 +24,10 @@ SKQ_SKIP_ATTR = "skq_skip"
 DIM_RATIO_MIN_DIMS = 3  # dim_ratio fires only above this many dims (plan: "dims > 3")
 TANGENT_KIND = "TangentConstraint"
 PATTERN_KINDS: frozenset[str] = frozenset({"RectangularPatternConstraint", "CircularPatternConstraint"})
+CROSS_RULE = "dup_sketch_cross_comp"  # design-wide WARN: same profile in >= 2 sketches (check() only, not per comp)
+CROSS_TRIVIAL_MIN = 3  # group of single-circle profiles is reported only from this many members up
+FINGERPRINT_DIGITS = 2  # profile curve lengths / radii rounded to 0.01 mm
+_CM_TO_MM = 10.0
 
 # Entity-ref attributes per objectType tail, from .fusion_defs/adsk/fusion.py (class line in brackets).
 # Names are exact: a stub class missing from the table has no entity refs (e.g. ConcentricCircle dim: none listed).
@@ -92,6 +96,9 @@ class Cons:
     refs: tuple[str, ...] = ()  # entity tokens the constraint names (entityOne / entityTwo)
 
 
+Sig = tuple[tuple[str, float], ...]  # sorted (curve kind, rounded mm) over all profile curves of a sketch
+
+
 @dataclass(frozen=True)
 class SketchFacts:
     name: str
@@ -100,6 +107,7 @@ class SketchFacts:
     dim_refs: tuple[tuple[str, ...], ...]  # entity tokens per dimension
     cons: tuple[Cons, ...]
     ents: tuple[Ent, ...]
+    profile_sig: Sig = ()  # () = no profile curves (never grouped by dup_sketch_cross_comp)
 
 
 Finding = tuple[str, str, str]  # (rule, level "FAIL" | "WARN", detail)
@@ -201,10 +209,15 @@ def _rule_sketch_fillet(f: SketchFacts) -> list[Finding]:
 def _rule_expr_dim(f: SketchFacts) -> list[Finding]:
     """dim 'X / 2' where X is the expression of another dimension in this sketch -> midpoint / symmetric recipe."""
     out: list[Finding] = []
+    norms = [_norm(o) for o in f.dim_exprs]  # once per dim: was O(D^2) _norm calls (rebuilt 'others' per dim)
+    counts = Counter(norms)
     for i, e in enumerate(f.dim_exprs):
         x = half_operand(e)
-        others = {_norm(o) for j, o in enumerate(f.dim_exprs) if j != i}
-        if x is not None and _norm(x) in others:
+        if x is None:
+            continue
+        target = _norm(x)
+        # some OTHER dim j != i has norms[j] == target
+        if counts[target] - int(norms[i] == target) > 0:
             out.append(("expr_dim", "WARN", f"dim '{e}' -> midpoint / symmetry / pattern / equal constraint"))
     return out
 
@@ -300,7 +313,7 @@ _RULE_FUNCS: dict[str, Callable[[SketchFacts], list[Finding]]] = {
     "pattern_expr": _rule_pattern_expr,
     "projected_unused": _rule_projected_unused,
 }
-RULES: frozenset[str] = frozenset(_RULE_FUNCS)
+RULES: frozenset[str] = frozenset(_RULE_FUNCS) | {CROSS_RULE}
 
 
 def check_facts(f: SketchFacts, skip: dict[str, str] | None = None) -> list[str]:
@@ -338,6 +351,49 @@ def skq_token(lines: list[str]) -> str:
     return f"{fails}F/{warns}W"
 
 
+def curve_sig(curve: object) -> tuple[str, float]:
+    """(objectType tail, mm) for one profile curve: SketchLine -> length, SketchArc / SketchCircle -> radius,
+    other kinds 0.0. Fusion lengths are cm; rounded to FINGERPRINT_DIGITS. Pure over duck-typed objects.
+
+    -> (kind, mm) for one profile curve
+    """
+    kind = _kind(curve)
+    if kind == "SketchLine":
+        size = getattr(curve, "length", 0.0)
+    elif kind in ("SketchArc", "SketchCircle"):
+        size = getattr(curve, "radius", 0.0)
+    else:
+        size = 0.0
+    return kind, round(float(size) * _CM_TO_MM, FINGERPRINT_DIGITS)
+
+
+def _trivial_sig(sig: Sig) -> bool:
+    """Exactly one curve and it is a circle."""
+    return len(sig) == 1 and sig[0][0] == "SketchCircle"
+
+
+def cross_dup_lines(items: list[tuple[str, Sig, bool]]) -> list[str]:
+    """items: (sketch name, profile_sig, skip CROSS_RULE) per checked sketch. One SKQ_WARN dup_sketch_cross_comp line
+    per group of >= 2 sketches with equal non-empty profile_sig (skipped members left out). Single-circle groups need
+    CROSS_TRIVIAL_MIN members. Dict grouping + sort inside each sig: O(n log n) in sketches. Pure.
+
+    -> one SKQ_WARN line per duplicate group, first-seen order
+    """
+    groups: dict[Sig, list[str]] = {}
+    for name, sig, skipped in items:
+        if sig and not skipped:
+            groups.setdefault(sig, []).append(name)
+    out: list[str] = []
+    for sig, names in groups.items():
+        if len(names) < 2 or (_trivial_sig(sig) and len(names) < CROSS_TRIVIAL_MIN):
+            continue
+        out.append(
+            f"SKQ_WARN {CROSS_RULE}: {', '.join(names)} same profile -> "
+            "one sketch + extrudes as new bodies / copy body / pattern"
+        )
+    return out
+
+
 def _items[T](coll: _Coll[T]) -> list[T]:
     return [coll.item(i) for i in range(coll.count)]
 
@@ -366,10 +422,13 @@ def sketch_facts(sk: adsk.fusion.Sketch) -> SketchFacts:
     geometricConstraints, sketchDimensions)
     """
     in_profile: set[str] = set()
+    sig: list[tuple[str, float]] = []
     for prof in _items(sk.profiles):
         for loop in _items(prof.profileLoops):
             for pc in _items(loop.profileCurves):
-                in_profile.add(pc.sketchEntity.entityToken)
+                curve = pc.sketchEntity
+                in_profile.add(curve.entityToken)
+                sig.append(curve_sig(curve))
     origin = sk.originPoint
     origin_token = origin.entityToken if origin is not None else None
     ents: list[Ent] = []
@@ -380,14 +439,21 @@ def sketch_facts(sk: adsk.fusion.Sketch) -> SketchFacts:
         (curves.sketchCircles, "circle"),
     ):
         for c in _items(coll):
-            ents.append(Ent(c.entityToken, kind, c.isFixed, c.isReference, c.entityToken in in_profile))
+            tok = c.entityToken  # one COM read per entity (was 2: token read twice)
+            ents.append(Ent(tok, kind, c.isFixed, c.isReference, tok in in_profile))
     for p in _items(sk.sketchPoints):
-        ents.append(Ent(p.entityToken, "point", p.isFixed, p.isReference, is_origin=p.entityToken == origin_token))
-    cons = tuple(Cons(_kind(c), _tokens(c, CONS_REF_ATTRS.get(_kind(c), ()))) for c in _items(sk.geometricConstraints))
+        tok = p.entityToken
+        ents.append(Ent(tok, "point", p.isFixed, p.isReference, is_origin=tok == origin_token))
+    cons: list[Cons] = []
+    for c in _items(sk.geometricConstraints):
+        kind = _kind(c)  # objectType read once per constraint (was 2-3)
+        cons.append(Cons(kind, _tokens(c, CONS_REF_ATTRS.get(kind, ()))))
     dims = _items(sk.sketchDimensions)
     dim_exprs = tuple(d.parameter.expression if d.parameter is not None else "" for d in dims)
     dim_refs = tuple(_tokens(d, DIM_REF_ATTRS.get(_kind(d), ())) for d in dims)
-    return SketchFacts(sk.name, sk.isFullyConstrained, dim_exprs, dim_refs, cons, tuple(ents))
+    return SketchFacts(
+        sk.name, sk.isFullyConstrained, dim_exprs, dim_refs, tuple(cons), tuple(ents), tuple(sorted(sig))
+    )
 
 
 def skip_of(sk: adsk.fusion.Sketch) -> tuple[dict[str, str], list[str]]:
@@ -412,25 +478,45 @@ def skip_of(sk: adsk.fusion.Sketch) -> tuple[dict[str, str], list[str]]:
         ]
 
 
-def check_sketches(sketches: _Coll[adsk.fusion.Sketch]) -> list[str]:
-    """SKQ lines over a sketches collection (one component's sketches for report()).
+def _check_each(
+    sketches: list[adsk.fusion.Sketch], over_budget: Callable[[], bool] | None
+) -> tuple[list[str], list[tuple[str, Sig, bool]]]:
+    """SKQ lines per sketch, one pass, plus (name, profile_sig, skip CROSS_RULE) per checked sketch for cross_dup_lines.
+    over_budget() is asked BEFORE each sketch: True -> stop, one
+    'SKIP skq budget: <k> of <N> sketches not checked' line. So the stage overruns the budget by at most one sketch."""
+    out: list[str] = []
+    sigs: list[tuple[str, Sig, bool]] = []
+    for i, sk in enumerate(sketches):
+        if over_budget is not None and over_budget():
+            out.append(f"SKIP skq budget: {len(sketches) - i} of {len(sketches)} sketches not checked")
+            break
+        skip, warns = skip_of(sk)
+        out.extend(warns)
+        facts = sketch_facts(sk)
+        out.extend(check_facts(facts, skip))
+        sigs.append((facts.name, facts.profile_sig, CROSS_RULE in skip))
+    return out, sigs
+
+
+def check_sketches(sketches: _Coll[adsk.fusion.Sketch], over_budget: Callable[[], bool] | None = None) -> list[str]:
+    """SKQ lines over a sketches collection (one component's sketches for report()), then dup_sketch_cross_comp
+    lines over the same collection only (same-comp duplicates; design-wide duplicates come from check()).
+    over_budget: optional stop test, asked before each sketch (see _check_each). None = no budget.
 
     -> SKQ lines over one collection of sketches (report() uses the comp's sketches)
     """
-    out: list[str] = []
-    for sk in _items(sketches):
-        skip, warns = skip_of(sk)
-        out.extend(warns)
-        out.extend(check_facts(sketch_facts(sk), skip))
-    return out
+    lines, sigs = _check_each(_items(sketches), over_budget)
+    return lines + cross_dup_lines(sigs)
 
 
-def check(design: adsk.fusion.Design) -> list[str]:
-    """SKQ lines over all sketches of all components in the design.
+def check(design: adsk.fusion.Design, over_budget: Callable[[], bool] | None = None) -> list[str]:
+    """SKQ lines over all sketches of all components in the design, then design-wide dup_sketch_cross_comp WARN lines.
+    over_budget: optional stop test, asked before each sketch across all components (build_check).
 
     -> SKQ lines over all sketches of all components (build_check)
     """
-    out: list[str] = []
+    sketches: list[adsk.fusion.Sketch] = []
     for comp in _items(design.allComponents):
-        out.extend(check_sketches(comp.sketches))
-    return out
+        sketches.extend(_items(comp.sketches))
+    lines, sigs = _check_each(sketches, over_budget)
+    return lines + cross_dup_lines(sigs)

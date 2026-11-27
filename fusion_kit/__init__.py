@@ -1,6 +1,6 @@
 """fusion_kit — shared Fusion 360 scripting helpers.
 
-Module index (main helpers per module; every public def with its signature is in docs/fusion_kit_api.md)
+Module index (main helpers per module; every public def with its signature is in docs/api/<module>.md)
 -------
 component    new_comp, new_occ.
 dfam         dfam_check (FDM rule scan per body), check_all, summarize_findings, set_skip, skip_from_body.
@@ -9,6 +9,8 @@ features     collection, profile, extrude, revolve, pattern_circular, pattern_re
              combine (join/cut/intersect), face_normal, fillet, chamfer, chamfer_greedy, bed_chamfer,
              select_edges, offset_plane, planar_faces, mirror_bodies, warp_relief_grooves.
              Types: Op (extrude/revolve, incl. "new"), CombineOp (join/cut/intersect).
+graph        collect, flag, attach_skq, render, diff, to_json, from_json, write_graph, run (build graph: one row per
+             timeline item with rule flags; writes fk_graph_<name>.txt/.json).
 holes        hole_simple, hole_counterbore, hole_countersink (native HoleFeature), cut_screw_slot,
              cut_screw_slot_live, teardrop_hole, seam_notch, sacrificial_depth.
 joints       dovetail, dovetail_profile, mark_mating.

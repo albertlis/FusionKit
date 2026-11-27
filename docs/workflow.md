@@ -101,6 +101,19 @@ The overhang check fails a downward face with n_z above 0.707. A 45-degree bed c
 
 Suppose `timeline_numbered` shows `hole_1` to `hole_6`, each with the same expressions. `CadSimplifier` flags them as one seed plus `pattern_grid`, with the quantity as a parameter. The worker rebuilds the holes that way, and the main session re-measures the plate. A pattern exception is allowed only when measured. A code comment states the reason.
 
+### Example: a cross-component duplicate from CadSimplifier
+
+Suppose four components `shim_0p2` to `shim_0p8` each hold a sketch with the same outline, and only the extrude depth differs. The `fp` rows for them carry identical `vals`. `CadSimplifier` flags them as `cross_comp_duplicate`, ranked first, because each extra component repeats about 12 ops. The recipe is one sketch with one `extrude` per thickness (thickness as a parameter). A separate component is kept only where print or assembly needs it, and a code comment states why.
+
+## After a build: read the graph first
+
+`build_and_check` writes `fk_graph_<root>.txt` and `.json` next to the build log, and prints a `GRAPH <path> items=N flags=M changed=K` line.
+
+- Read the `GRAPH` line, the `!!` flag line and the `~` / `+` / `-` diff lines first. They list what changed since the last build.
+- Open `fk_graph_<root>.txt` for the item you need: params, inputs, outputs, health, flags, `src`.
+- Open the part script only at the `src` file:line that the graph gives.
+- The graph is written in the build log directory; `log_path=''` turns it off.
+
 ## Batching and parallel calls
 
 - Independent calls go in one message. Two edits to two different files go in one message.
